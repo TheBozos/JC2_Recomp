@@ -119,7 +119,7 @@ shared with the *Twisted Metal: Black*, *The Third Age*, *Valkyrie Profile 2* an
 ## Build and run
 
 ```bash
-git clone --recurse-submodules https://github.com/boubou666/JC2_Recomp.git
+git clone --recurse-submodules https://github.com/TheBozos/JC2_Recomp.git
 cd JC2_Recomp
 scripts/extract_iso.sh "/path/to/Jade Cocoon 2 (USA).iso"   # disc files -> game/
 scripts/build_tools.sh                                       # ps2_recomp, ps2_analyzer, ps2_vu_aot -> build/tools
