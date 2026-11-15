@@ -11,11 +11,23 @@
 
 `SYSTEM.CNF` sets `HDDUNITPOWER = NICHDD`, so the game may probe the HDD.
 
-## Pipeline
+## Pipeline (BozoEngine, since 2026-11-15)
 
-Same as the other ports on the fork (TLOTR_TTA_Recomp scripts): `extract_iso.sh` → `build_tools.sh` → `ghidra.sh`
-(the function map, needed because the ELF is stripped) → `analyze.sh` (SDK stubs) → `recomp.sh` → `build_runtime.sh`
-→ `run.sh`.
+The port is built on BozoEngine (TheBozos/BozoEngine, the `BozoEngine` submodule). Everything is made at build time
+from the player's own files in `game/`, into `build/`:
+
+1. `tools/jc2_bozo_prepare.py`: `SLUS_203.09` with its code spans described as sections (`0x100000-0x4D8800`,
+   `0x4E3768-0x4E3E80`, `0x6B2B00-0x6B9310`; the VU1 microcode and the data left out), and the Ghidra function map as
+   explicit entries (`recomp/ghidra/jc2_functions.csv`).
+2. `bozo-externals` with `recomp/jc2_symbols.txt` (what BozoEngine answers) and the port's registrations
+   (`tools/jc2_bozo_overrides.py` reads them from `runtime/jc2_*.cpp`).
+3. `bozo-recomp`: 75,380 functions, 0 untranslated instructions.
+4. `tools/jc2_bozo_audio.py`: the IOP modules the game talks to, compiled offline to native C++ (BozoEngine's
+   `tools/native_irx`): `LIBSD`, `MODMIDI`, `MODHSYN`, `UAMAN`, `IMODEMAN`, `M2IOPSYS`, `M2SOUND`, `M2IMODE`.
+5. `jc2-headless` (no window yet): `cmake -S . -B build/bozo_game -G Ninja && cmake --build build/bozo_game`.
+
+The PS2Recomp pipeline below (`extract_iso.sh` → `build_tools.sh` → `ghidra.sh` → `analyze.sh` → `recomp.sh` →
+`build_runtime.sh` → `run.sh`) is the old one, kept until the BozoEngine build draws.
 
 ## Log
 
@@ -344,3 +356,38 @@ VP2S_Recomp `tools/find_entry_points.py`, `tools/wrap_elf.py`.
 - Open from the owner's first session: the throne-room scene with Mahbu after the forest stops (game alive, 60 fps,
   a script waiting); the picture shakes up and down by about a line (an interlace half-line offset every other
   frame, the CPU GS's stabiliser has no native equivalent yet).
+
+## BozoEngine bring-up (2026-11-15)
+
+Advice asked of TTA and VP2S (both answered): boot headless first, zero unknown device accesses, then the frame, the
+sound, then draws one family at a time; dump EE RAM at the failing boundary (`--dump-ram`).
+
+- **Symbol map** (`recomp/jc2_symbols.txt`): `bozo_symbolmap.py match` against DC's and TMB's unstripped
+  executables names 663 functions by evidence; 45 more are reviewed (`recomp/jc2_symbols_reviewed.txt`): the PS2Recomp
+  analyzer's names the game ran under for weeks, plus ones read here. TTA's warning held: `sceMcMkdir` (0x125748) is
+  `sceMcOpen(..., 0x40)`; named as mkdir. `InitAlarm` (0x11AB90) installs the old SDK's alarm patch (syscall 116):
+  named, BozoEngine answers it; `SetAlarm`/`iSetAlarm` are syscalls 0xFC/0xFD at 0x119C60/0x119C70.
+  `sceSifLoadModule` is 0x121960 and `sceSifLoadStartModule` 0x121980 (the game calls the latter with a result).
+- **VU1 microcode in the code span**: 0x4D8800-0x4E3768 is VU1 code and data. Left in, it gave 1,015 untranslated
+  words; described as data, none.
+- **`sceIpuInit`** (0x119868, called at 0x2B03F8) resets the IPU: answered as done (libmpeg is native).
+- **IOP modules**: SIO2MAN, MTAPMAN, PADMAN, MCMAN, MCSERV are answered at their EE APIs by BozoEngine (id 1, nothing
+  started). The others are compiled (bases as on the console: LIBSD 0x4F500, MODMIDI 0x54200, MODHSYN 0x57F00, UAMAN
+  0x66E00, IMODEMAN 0x6A100, M2IOPSYS 0xAC900, M2SOUND 0xAE300, M2IMODE 0xBC800; heap from 0xC1000). The game binds
+  M2SOUND's server 0x10000 (`guid 65536`) and M2IMODE's 0x10002. M2IMODE cannot be skipped: when the game's i-mode
+  setup (0x484220, from 0x498FB0) fails, the system init at 0x15B9F0 returns early, before it registers the packet
+  buffers (table 0x6CC5F0), and the main loop then spins at 0x13E070 on an empty buffer.
+- **The game's EE RPC servers**: Genki's drivers call back to the EE: M2SOUND to 0x10001 (handler 0x234A60, commands
+  0x400-0x405: stream state, data requests through `sceSifSetDma`) and M2IMODE to 0x10003 (handler 0x484740). The game
+  registers them with libsif's own `sceSifRegisterRpc` (0x11D290), then waits in `sceSifRpcLoop` for SIF commands
+  that do not exist here. `runtime/jc2_port.cpp` turns each registration into a `sif.eeServers` entry that runs the
+  game's handler at once on a context of its own (the thread's gp, a stack at the bottom of the server thread's
+  stack, no stops): both handlers only touch game state and start SIF transfers.
+- **BozoEngine changes** (branch `jc2/native-irx-host`): vblank 4/6 waits in the IRX host (IMODEMAN polls
+  `WaitVblankStart`); `recompile.py` leaves out a pointer guess that is data (IMODEMAN 0x84C10) instead of failing; the
+  "no blocking progress" error names the stuck task.
+- **Native stack**: the game's code nests deep enough to overflow the default 2 MB thread stack (0xC00000FD after the
+  first sound bank upload); `jc2-headless` links with a 256 MB reserve.
+- **Result** (boot 20): 600 frames headless, 0 unknown device accesses, 605 port overrides. Still device accesses
+  (11,722): the game's DMA kicks (VIF1, GIF, IPU-to) and GS `EXTWRITE`, to be replaced by native draws.
+

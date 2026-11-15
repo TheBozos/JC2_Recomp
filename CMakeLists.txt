@@ -1,118 +1,91 @@
 cmake_minimum_required(VERSION 3.21)
-project(JC2_Recomp LANGUAGES C CXX)
+project(JC2_Recomp LANGUAGES CXX)
 
-# Jade Cocoon 2 (NTSC-U, SLUS-20309) static recompilation on top of PS2Recomp.
-#
-# Build the tools first (scripts/build_tools.sh), generate code (scripts/recomp.sh),
-# then configure this project to get the `ps2EntryRunner` executable with the
-# recompiled game linked in.
+# Jade Cocoon 2 (NTSC-U, SLUS-20309): a native PC port on BozoEngine (TheBozos/BozoEngine, the submodule). The game's
+# EE code is recompiled offline from the player's own disc files (game/), at build time, into build/; nothing from the
+# disc is committed. No PS2 hardware at any level: the game's calls are answered by native libraries and JC2's own
+# port code (runtime/).
 
-set(JC2_GENERATED_DIR "${CMAKE_SOURCE_DIR}/generated" CACHE PATH
-    "Directory containing the output of ps2_recomp for the game ELF")
-
-# Only the runtime is needed here; the recompiler/analyzer are built separately.
-set(PS2X_BUILD_RECOMP OFF CACHE BOOL "" FORCE)
-set(PS2X_BUILD_ANALYZER OFF CACHE BOOL "" FORCE)
-set(PS2X_BUILD_TEST OFF CACHE BOOL "" FORCE)
-set(PS2X_BUILD_STUDIO OFF CACHE BOOL "" FORCE)
-
-add_subdirectory(PS2Recomp)
-
-file(GLOB JC2_GENERATED_SOURCES CONFIGURE_DEPENDS "${JC2_GENERATED_DIR}/*.cpp")
-if(NOT JC2_GENERATED_SOURCES)
-    message(FATAL_ERROR
-        "No generated sources in ${JC2_GENERATED_DIR}. Run scripts/recomp.sh first.")
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+set(JC2_GAME_DIR "${CMAKE_SOURCE_DIR}/game" CACHE PATH "User-owned extracted disc files")
+set(JC2_ISO "${CMAKE_SOURCE_DIR}/Jade Cocoon 2 (USA).iso" CACHE FILEPATH "User-owned NTSC-U disc image")
+set(BOZO_ENGINE_DIR "${CMAKE_SOURCE_DIR}/BozoEngine" CACHE PATH "Pinned native engine source")
+option(JC2_WINDOW "Build the SDL3 game window" OFF)
+set(BOZO_APP ${JC2_WINDOW} CACHE BOOL "" FORCE)
+set(BOZO_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+add_subdirectory("${BOZO_ENGINE_DIR}" BozoEngine)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
-# The runtime ships a placeholder register_functions.cpp that defines the same
-# function-table globals as the generated one; drop it from the runner.
-get_target_property(_runner_sources ps2EntryRunner SOURCES)
-list(FILTER _runner_sources EXCLUDE REGEX "src/runner/register_functions\.cpp$")
-set_property(TARGET ps2EntryRunner PROPERTY SOURCES ${_runner_sources})
+set(jc2_gen ${CMAKE_BINARY_DIR}/jc2_gen)
+file(MAKE_DIRECTORY ${jc2_gen})
+set(jc2_symbols ${CMAKE_SOURCE_DIR}/recomp/jc2_symbols.txt)
 
-file(GLOB JC2_RUNTIME_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/runtime/*.cpp")
-# Out of the unity batches: an edit to the game layer then rebuilds one small file, not a batch of generated code.
-set_source_files_properties(${JC2_RUNTIME_SOURCES} TARGET_DIRECTORY ps2EntryRunner PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+# The executable with its code spans described (the VU1 microcode and the data left out) and the offline entry points.
+add_custom_command(OUTPUT ${jc2_gen}/jc2.elf ${jc2_gen}/jc2.entries
+  COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/jc2_bozo_prepare.py ${CMAKE_SOURCE_DIR} ${jc2_gen} ${JC2_GAME_DIR}
+  DEPENDS tools/jc2_bozo_prepare.py ${JC2_GAME_DIR}/SLUS_203.09 recomp/ghidra/jc2_functions.csv
+  COMMENT "Preparing JC2's executable offline")
 
-# IOP modules recompiled to native C++ by the fork's tools/iop_recomp.py (scripts/iop_recomp.sh, from the modules
-# PS2X_IOP_DUMP_MODULES saved; PS2X_IOP_NATIVE=1 runs them, as in TMB): their own object library, outside the
-# unity batches (each file's names are its own), without debug info.
-file(GLOB JC2_IOP_NATIVE_SOURCES CONFIGURE_DEPENDS "${JC2_GENERATED_DIR}/iop/*.cpp")
-if(JC2_IOP_NATIVE_SOURCES)
-    add_library(jc2_iop_native OBJECT ${JC2_IOP_NATIVE_SOURCES})
-    target_link_libraries(jc2_iop_native PRIVATE ps2x::iop)
-    set_target_properties(jc2_iop_native PROPERTIES UNITY_BUILD OFF)
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(jc2_iop_native PRIVATE -O2 -g0)
-    endif()
-    target_sources(ps2EntryRunner PRIVATE $<TARGET_OBJECTS:jc2_iop_native>)
+# What BozoEngine answers (named by recomp/jc2_symbols.txt) and what the port overrides (runtime/jc2_*.cpp).
+file(GLOB jc2_port_sources CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/runtime/jc2_*.cpp)
+add_custom_command(OUTPUT ${jc2_gen}/jc2_externals.txt
+  COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/jc2_bozo_overrides.py ${CMAKE_SOURCE_DIR} ${jc2_gen}/jc2_overrides.txt
+  COMMAND bozo-externals ${jc2_gen}/jc2.elf ${jc2_gen}/jc2_externals.txt --overrides ${jc2_gen}/jc2_overrides.txt --symbols ${jc2_symbols}
+  DEPENDS bozo-externals tools/jc2_bozo_overrides.py ${jc2_gen}/jc2.elf ${jc2_symbols} ${jc2_port_sources})
+
+set(jc2_chunks 32)
+set(jc2_sources ${jc2_gen}/jc2_functions.h ${jc2_gen}/jc2_table.cpp)
+math(EXPR last "${jc2_chunks} - 1")
+foreach(i RANGE ${last})
+  string(LENGTH "${i}" len)
+  if(len EQUAL 1)
+    set(n "00${i}")
+  else()
+    set(n "0${i}")
+  endif()
+  list(APPEND jc2_sources ${jc2_gen}/jc2_${n}.cpp)
+endforeach()
+add_custom_command(OUTPUT ${jc2_sources}
+  COMMAND bozo-recomp ${jc2_gen}/jc2.elf ${jc2_gen} --prefix jc2 --symbol-prefix jc2_ --files ${jc2_chunks} --no-comments
+          --externals ${jc2_gen}/jc2_externals.txt --symbols ${jc2_symbols} --entries ${jc2_gen}/jc2.entries
+          --report ${jc2_gen}/jc2_report.txt
+  DEPENDS bozo-recomp ${jc2_gen}/jc2.elf ${jc2_gen}/jc2.entries ${jc2_gen}/jc2_externals.txt ${jc2_symbols}
+  COMMENT "Recompiling JC2's EE code (bozo-recomp)")
+add_custom_target(jc2_generate DEPENDS ${jc2_sources})
+
+add_library(jc2_game STATIC ${jc2_sources})
+target_link_libraries(jc2_game PUBLIC bozo_runtime_headers)
+target_include_directories(jc2_game PUBLIC ${jc2_gen})
+target_compile_options(jc2_game PRIVATE -O1 -w -ffp-contract=off)
+
+# The sound driver's IOP modules compiled offline to native C++ (strict: every import a native host service).
+set(jc2_audio_gen ${CMAKE_BINARY_DIR}/jc2_audio_gen)
+set(jc2_audio_sources)
+set(jc2_audio_inputs)
+foreach(module LIBSD MODMIDI MODHSYN UAMAN IMODEMAN M2IOPSYS M2SOUND M2IMODE)
+  string(TOLOWER "${module}" lower)
+  list(APPEND jc2_audio_sources ${jc2_audio_gen}/${lower}_iop.cpp)
+  list(APPEND jc2_audio_inputs ${JC2_GAME_DIR}/IRX/${module}.IRX)
+endforeach()
+add_custom_command(OUTPUT ${jc2_audio_sources} ${jc2_audio_gen}/jc2_audio_modules.h
+  COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/jc2_bozo_audio.py ${CMAKE_SOURCE_DIR} ${jc2_audio_gen} ${JC2_GAME_DIR} ${BOZO_ENGINE_DIR}
+  DEPENDS ${jc2_audio_inputs} tools/jc2_bozo_audio.py
+          ${BOZO_ENGINE_DIR}/tools/native_irx/relocate.py ${BOZO_ENGINE_DIR}/tools/native_irx/recompile.py
+  COMMENT "Compiling JC2's sound driver modules offline (strict mode)")
+add_library(jc2_audio_code OBJECT ${jc2_audio_sources})
+target_link_libraries(jc2_audio_code PRIVATE bozo_runtime_headers)
+target_compile_options(jc2_audio_code PRIVATE -O1 -w)
+
+add_executable(jc2-headless runtime/jc2_main.cpp runtime/jc2_port.cpp runtime/jc2_audio.cpp $<TARGET_OBJECTS:jc2_audio_code>)
+target_include_directories(jc2-headless PRIVATE ${jc2_audio_gen})
+target_link_libraries(jc2-headless PRIVATE jc2_game bozo_host)
+target_compile_definitions(jc2-headless PRIVATE
+  JC2_DEFAULT_ELF="${JC2_GAME_DIR}/SLUS_203.09" JC2_DEFAULT_ISO="${JC2_ISO}" JC2_SYMBOL_MAP="${jc2_symbols}")
+if(MINGW)
+  target_link_options(jc2-headless PRIVATE -static -Wl,--stack,268435456)
 endif()
-
-# Code overlays recompiled as overlay modules by scripts/overlays.sh (generated/overlays/<module>/): their own object
-# library in unity batches (every name carries its module prefix), without debug info.
-file(GLOB_RECURSE JC2_OVERLAY_SOURCES CONFIGURE_DEPENDS "${JC2_GENERATED_DIR}/overlays/*.cpp")
-if(JC2_OVERLAY_SOURCES)
-    add_library(jc2_overlays OBJECT ${JC2_OVERLAY_SOURCES})
-    target_link_libraries(jc2_overlays PRIVATE ps2_runtime)
-    # Each module's files include its <module>_stubs.h / _functions.h by name: scripts/overlays.sh copies them all
-    # into one folder (one include directory per module overflowed the Windows command line).
-    target_include_directories(jc2_overlays PRIVATE "${JC2_GENERATED_DIR}/overlays/include" "${JC2_GENERATED_DIR}")
-    set_target_properties(jc2_overlays PROPERTIES UNITY_BUILD ON UNITY_BUILD_BATCH_SIZE 32)
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(jc2_overlays PRIVATE -O2 -g0)
-    endif()
-    target_sources(ps2EntryRunner PRIVATE $<TARGET_OBJECTS:jc2_overlays>)
-endif()
-
-# VU1 microcode compiled ahead of time by ps2_vu_aot (scripts/recomp.sh): an object library, built at -O3 outside
-# the unity batches. Each file takes GCC several GB: at most 4 compile at once.
-file(GLOB JC2_VU1_AOT_SOURCES CONFIGURE_DEPENDS "${JC2_GENERATED_DIR}/vu1/*.cpp")
-if(JC2_VU1_AOT_SOURCES)
-    set_property(GLOBAL APPEND PROPERTY JOB_POOLS jc2_vu1_aot=4)
-    add_library(jc2_vu1_aot OBJECT ${JC2_VU1_AOT_SOURCES})
-    target_link_libraries(jc2_vu1_aot PRIVATE ps2_runtime)
-    set_target_properties(jc2_vu1_aot PROPERTIES UNITY_BUILD OFF JOB_POOL_COMPILE jc2_vu1_aot)
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(jc2_vu1_aot PRIVATE -O3 -g0)
-    endif()
-    target_sources(ps2EntryRunner PRIVATE $<TARGET_OBJECTS:jc2_vu1_aot>)
-endif()
-
-# register_functions.cpp fills the function table in one constructor of ~214,000 stores: GCC takes 35 min over it at
-# -O2 -g, the tail of every full build. It runs once at startup, so build it alone and unoptimized.
-set_source_files_properties("${JC2_GENERATED_DIR}/register_functions.cpp" TARGET_DIRECTORY ps2EntryRunner PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set_source_files_properties("${JC2_GENERATED_DIR}/register_functions.cpp" TARGET_DIRECTORY ps2EntryRunner PROPERTIES COMPILE_OPTIONS "-O0;-g0")
-endif()
-
-target_sources(ps2EntryRunner PRIVATE ${JC2_GENERATED_SOURCES} ${JC2_RUNTIME_SOURCES})
-target_include_directories(ps2EntryRunner PRIVATE "${JC2_GENERATED_DIR}")
-
-# Line tables only for the runner's own sources (the generated code): full -g makes 2.8 GB of DWARF, which slows every
-# batch, the link and the split. Backtraces through generated code keep file:line; the runtime library keeps full -g.
-# (A per-source option would take the files out of their unity batches, hence the target option, after the config's -g.)
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(ps2EntryRunner PRIVATE $<$<CONFIG:RelWithDebInfo,Debug>:-g1>)
-endif()
-
-# Windows loads no image over 2 GB, and with debug info the runner is ~3 GB (2.8 GB of DWARF for the generated
-# code, 106 MB of .text). Move the debug info to ps2EntryRunner.debug next to it; gdb finds it through the debug link.
-# ps2EntryRunner is created in the submodule, where POST_BUILD cannot reach it: `jc2_runner` (what
-# scripts/build_runtime.sh builds) splits once per relink, tracked by a stamp file.
-if(WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND CMAKE_OBJCOPY AND CMAKE_STRIP)
-    set(_jc2_split_stamp "${CMAKE_BINARY_DIR}/ps2EntryRunner.split.stamp")
-    add_custom_command(OUTPUT "${_jc2_split_stamp}"
-        COMMAND "${CMAKE_OBJCOPY}" --only-keep-debug "$<TARGET_FILE:ps2EntryRunner>" "$<TARGET_FILE_DIR:ps2EntryRunner>/ps2EntryRunner.debug"
-        COMMAND "${CMAKE_STRIP}" --strip-debug "$<TARGET_FILE:ps2EntryRunner>"
-        COMMAND "${CMAKE_OBJCOPY}" "--add-gnu-debuglink=$<TARGET_FILE_DIR:ps2EntryRunner>/ps2EntryRunner.debug" "$<TARGET_FILE:ps2EntryRunner>"
-        COMMAND "${CMAKE_COMMAND}" -E touch "${_jc2_split_stamp}"
-        DEPENDS ps2EntryRunner
-        COMMENT "Moving the runner's debug info to ps2EntryRunner.debug (Windows image size limit)"
-        VERBATIM)
-    add_custom_target(jc2_runner ALL DEPENDS "${_jc2_split_stamp}")
-else()
-    add_custom_target(jc2_runner ALL DEPENDS ps2EntryRunner)
-endif()
-
-list(LENGTH JC2_GENERATED_SOURCES _jc2_count)
-message(STATUS "JC2_Recomp: linking ${_jc2_count} generated source files from ${JC2_GENERATED_DIR}")

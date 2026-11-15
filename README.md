@@ -22,6 +22,13 @@ Not an emulator: the game's own MIPS R5900 code, rebuilt as a native program on 
 
 ## Status
 
+**Moving to BozoEngine (2026-11-15).** The port now builds on [BozoEngine](https://github.com/TheBozos/BozoEngine), The
+Bozos' own toolchain with no PS2 hardware at any level, in place of the PS2Recomp fork. The game boots headless on it:
+600 frames, the sound and i-mode drivers compiled to native code, no unknown device access. There is no picture yet: the
+draws are being ported to native renderer calls. The PS2Recomp notes below describe the previous build, kept until the
+BozoEngine one draws. Build: `cmake -S . -B build/bozo_game -G Ninja && cmake --build build/bozo_game` (the disc files in
+`game/`), then `build/bozo_game/jc2-headless --frames 600`.
+
 **Bring-up, not playable yet.** On the full native path (no paraLLEl-GS, no IOP interpreter) the game boots through
 the intro movies, the title screen and the main menu, and New game plays the opening movie and the first in-game scenes
 with their dialogue, then free control from the Jade Throne Room out to the Wormhole Forest. Windows comes first, then Linux.
