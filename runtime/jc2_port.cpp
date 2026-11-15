@@ -17,27 +17,35 @@
 namespace jc2
 {
     void notifyFrame();
+    void drawFrameEnd();
 
     // The frame wait. JC2's flip (0x15A150) counts its frames (0x6D6190) and waits in 0x15B400(target, &late) until the
-    // vblank handler's counter (0x6D61AC) reaches the frame count; a late frame sets the counter back to target - 1 and
-    // counts itself (0x6D61B0). It returns the CSR FIELD bit (no GS here: the field parity of the vblanks started),
-    // which picks the half-line offset of the next field. The game steps one fixed frame per call: the frame ends here.
+    // vblank handler's counter (0x6D61AC) reaches the frame count: it sets the wake flag (0x6D61A4) and sleeps
+    // (SleepThread); the vblank handler (0x15B360) wakes it. A late frame sets the counter back to target - 1 and counts
+    // itself (0x6D61B0). While the main thread sleeps, the game's lower threads run: the movie player (0x1533C0), the
+    // loader. So the game's own wait runs; the frame ends at its entry (published, paced, the modules' frame listeners).
+    // The wait returns the CSR FIELD bit, read at 0x15B4B0: answered natively (fieldRead), no GS.
     constexpr uint32_t kFrameWait = 0x0015B400u;
-    constexpr uint32_t kVBlankCounter = 0x006D61ACu;
+    constexpr uint32_t kFieldRead = 0x0015B4B0u; // native site: ld v0, 0x12001000
 
     void frameWait(uint8_t *ram, R5900Context *ctx, Runtime *rt)
     {
-        const uint32_t target = ctx->r[4].uw[0], late = ctx->r[5].uw[0];
-        const uint32_t onTime = 0u;
-        std::memcpy(ram + (late & 0x1FFFFFCu), &onTime, 4);
-        uint32_t counter;
-        std::memcpy(&counter, ram + kVBlankCounter, 4);
-        if (static_cast<int32_t>(counter - target) < 0)
-            std::memcpy(ram + kVBlankCounter, &target, 4);
+        drawFrameEnd();
         bozo::port::frameEnd(rt, ctx);
         notifyFrame();
-        ctx->r[2].ud[0] = bozo::port::vblankCount(rt) & 1u;
-        ctx->pc = ctx->r[31].uw[0];
+        jc2_func_0x15b400(ram, ctx, rt);
+    }
+
+    // The game's reads of hardware state with no hardware behind them, answered inline.
+    bool nativeInstruction(uint8_t *, R5900Context *ctx, Runtime *rt, uint32_t pc)
+    {
+        if (pc == kFieldRead)
+        {
+            // GS CSR as the wait reads it: only FIELD (bit 13), the parity of the vblanks started.
+            ctx->r[2].ud[0] = (bozo::port::vblankCount(rt) & 1u) << 13;
+            return true;
+        }
+        return false;
     }
 
     // libipu's sceIpuInit (0x119868: stops the IPU's DMA, resets the IPU and waits for it): the game calls it once at
@@ -127,11 +135,55 @@ namespace jc2
         };
     }
 
+    // Bring-up probe (JC2_TRACE_MPEG=1): the movie player's slot check (0x155380, queue in a0): its count, capacity and fields.
+    void probeMovieQueue(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+    {
+        static unsigned n = 0;
+        static const bool trace = std::getenv("JC2_TRACE_MPEG") != nullptr;
+        const uint32_t q = ctx->r[4].uw[0];
+        if (trace && n++ < 4)
+        {
+            uint32_t w[12];
+            std::memcpy(w, ram + (q & 0x1FFFFFFu), sizeof(w));
+            std::printf("[jc2:movie] queue 0x%x:", q);
+            for (uint32_t v : w)
+                std::printf(" %08x", v);
+            std::printf("\n");
+        }
+        rt->functions.generated(0x155380u)(ram, ctx, rt);
+    }
+
+    // Bring-up probe (JC2_TRACE_MPEG=1): a library stub's calls (the first few), answered by BozoEngine as before.
+    template <uint32_t Address> void traceLibrary(uint8_t *, R5900Context *ctx, Runtime *rt)
+    {
+        static unsigned n = 0;
+        static const bool trace = std::getenv("JC2_TRACE_MPEG") != nullptr;
+        const uint32_t a0 = ctx->r[4].uw[0], a1 = ctx->r[5].uw[0], a2 = ctx->r[6].uw[0], ra = ctx->r[31].uw[0];
+        bozo::port::callLibrary(rt, ctx, Address);
+        if (trace && n++ < 6)
+            std::printf("[jc2:lib] 0x%x(0x%x, 0x%x, 0x%x) from 0x%x -> 0x%x (vblank %llu)\n", Address, a0, a1, a2, ra,
+                        ctx->r[2].uw[0], (unsigned long long)bozo::port::vblankCount(rt));
+        ctx->pc = ra;
+    }
+
     void install(Runtime &, bozo::port::Registry &r)
     {
+        r.registerFunction(0x117cd0u, traceLibrary<0x117cd0u>); // sceMpegInit
+        r.registerFunction(0x117d70u, traceLibrary<0x117d70u>); // sceMpegCreate
+        r.registerFunction(0x1181d0u, traceLibrary<0x1181d0u>); // sceMpegAddCallback
+        r.registerFunction(0x117490u, traceLibrary<0x117490u>); // sceMpegAddStrCallback
+        r.registerFunction(0x117180u, traceLibrary<0x117180u>); // sceMpegDemuxPssRing
+        r.registerFunction(0x117ff0u, traceLibrary<0x117ff0u>); // sceMpegGetPicture
+        r.registerFunction(0x118108u, traceLibrary<0x118108u>); // sceMpegIsEnd
+        r.registerFunction(0x155380u, probeMovieQueue);
         r.registerFunction(kSifRegisterRpc, sifRegisterRpc);
         r.registerFunction(kSifBindRpc, sifBindRpc);
         r.registerFunction(kFrameWait, frameWait);
+        // Native graphics: every retired GIF/VIF/GS register access stops the run. Opt-in (JC2_NATIVE_GRAPHICS=1) until
+        // the game's register sites (docs/RECOMP_NOTES.md, "Graphics register sites") are all replaced by native draws;
+        // meanwhile BozoEngine's I/O library completes them without any GS behind them.
+        if (const char *v = std::getenv("JC2_NATIVE_GRAPHICS"); v && v[0] == '1')
+            r.nativeGraphics(&nativeInstruction);
         r.registerFunction(kIpuInit, ipuInit);
     }
 } // namespace jc2

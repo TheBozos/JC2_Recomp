@@ -81,11 +81,25 @@ add_library(jc2_audio_code OBJECT ${jc2_audio_sources})
 target_link_libraries(jc2_audio_code PRIVATE bozo_runtime_headers)
 target_compile_options(jc2_audio_code PRIVATE -O1 -w)
 
-add_executable(jc2-headless runtime/jc2_main.cpp runtime/jc2_port.cpp runtime/jc2_audio.cpp $<TARGET_OBJECTS:jc2_audio_code>)
+set(jc2_runtime runtime/jc2_main.cpp runtime/jc2_port.cpp runtime/jc2_audio.cpp runtime/jc2_draw.cpp)
+add_executable(jc2-headless ${jc2_runtime} $<TARGET_OBJECTS:jc2_audio_code>)
 target_include_directories(jc2-headless PRIVATE ${jc2_audio_gen})
 target_link_libraries(jc2-headless PRIVATE jc2_game bozo_host)
 target_compile_definitions(jc2-headless PRIVATE
   JC2_DEFAULT_ELF="${JC2_GAME_DIR}/SLUS_203.09" JC2_DEFAULT_ISO="${JC2_ISO}" JC2_SYMBOL_MAP="${jc2_symbols}")
 if(MINGW)
   target_link_options(jc2-headless PRIVATE -static -Wl,--stack,268435456)
+endif()
+
+# The game window (SDL3, OpenGL 3.3): BozoEngine's platform layer. SDL3 and Dear ImGui are fetched at configure unless
+# FETCHCONTENT_SOURCE_DIR_SDL3 / FETCHCONTENT_SOURCE_DIR_IMGUI name local copies of the pinned versions.
+if(JC2_WINDOW)
+  add_executable(jc2 ${jc2_runtime} $<TARGET_OBJECTS:jc2_audio_code>)
+  target_include_directories(jc2 PRIVATE ${jc2_audio_gen})
+  target_link_libraries(jc2 PRIVATE jc2_game bozo_host bozo_app)
+  target_compile_definitions(jc2 PRIVATE JC2_WITH_WINDOW
+    JC2_DEFAULT_ELF="${JC2_GAME_DIR}/SLUS_203.09" JC2_DEFAULT_ISO="${JC2_ISO}" JC2_SYMBOL_MAP="${jc2_symbols}")
+  if(MINGW)
+    target_link_options(jc2 PRIVATE -static -Wl,--stack,268435456)
+  endif()
 endif()

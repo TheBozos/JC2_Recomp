@@ -391,3 +391,30 @@ sound, then draws one family at a time; dump EE RAM at the failing boundary (`--
 - **Result** (boot 20): 600 frames headless, 0 unknown device accesses, 605 port overrides. Still device accesses
   (11,722): the game's DMA kicks (VIF1, GIF, IPU-to) and GS `EXTWRITE`, to be replaced by native draws.
 
+
+## Window and the first draw steps (2026-11-16)
+
+- **Window**: `-DJC2_WINDOW=ON` builds `jc2` (BozoEngine's SDL3 platform layer; SDL3 3.4.20 and Dear ImGui 1.92.7 from
+  `FETCHCONTENT_SOURCE_DIR_SDL3` / `FETCHCONTENT_SOURCE_DIR_IMGUI` when a local copy exists). It runs at 60 frames/s;
+  a played run keeps its saves in the user folder unless `--card-dir` names another. Captures: `--capture-dir`,
+  `--capture-frame N`, `--quit-after N`. `runtime/jc2_draw.cpp` publishes a frame at each frame wait.
+- **The frame wait runs as the game wrote it**: answering 0x15B400 at once kept the main thread from ever sleeping,
+  so the game's lower threads starved: the movie player (thread entry 0x1533C0, created at frame ~550) never ran. The
+  override now ends the native frame at the wait's entry, then runs the game's own wait (sleep until the vblank
+  handler 0x15B360 wakes it). Its GS CSR read (FIELD, 0x15B4B0) is a native site answered from the vblank parity.
+- **Movies**: the intro story, the title and the long dark part are one movie (`MOV/ADV0.PSS`), so movies come first.
+  The player: `sceMpegCreate` at 0x152C04, six nodata callbacks 0x1535D0 (`sceMpegAddCallback`), video and PCM stream
+  callbacks, the CD feeder 0x1531A0 calling `sceMpegDemuxPssRing`, and the picture loop 0x153410 (slot queue at the
+  player's +0x58: 0x155250 full, 0x155380 next slot; `sceMpegGetPicture` at 0x15348C; `sceMpegIsEnd`). The display
+  side 0x20F030 takes a picture only on frames whose FIELD bit (0x6D618C) is 1 and no GIF transfer is in flight
+  (+0x48, cleared by the GIF end), then kicks a GIF chain of the picture's image transfer.
+  BozoEngine's libmpeg is written around TMB (its `sceMpegCreate` writes TMB addresses, 0x1717BC and 0x171800, into
+  guest memory), and its "not decodable yet" path queues the game's nodata callback: JC2's (0x154020) is the IPU
+  feeder of the console's libmpeg, which waits for data (+0x44) that never comes and spins (frame ~530 headless).
+  Next: a JC2 movie owner (as VP2S did), pictures to the renderer's backdrop, PCM to the port stream.
+- **Graphics register sites** (survey over 530 frames with `JC2_NATIVE_GRAPHICS=0`, the default for now): all must go
+  before native graphics is on (`JC2_NATIVE_GRAPHICS=1` faults at the first). VIF1: the frame's packet kick
+  0x13E0DC/0x13E104/0x13E124 (poll STR, TADR/QWC, CHCR), 0x14F538/0x14F980, 0x150FC4, 0x15C60C. GIF: 0x13E1D8/0x13E220,
+  the flip's display packet 0x15A04C/0x15A234/0x15A9A8, the movie picture 0x20F0C8-0x20F110 and 0x1556F8. GS:
+  `EXTWRITE` 0x15A270, CSR 0x15B4B0 (now native). Not graphics (kept): T0 0x13DF00/0x13E24C/0x13E5C0, the IPU-to
+  channel 0x153B38/0x153D04.

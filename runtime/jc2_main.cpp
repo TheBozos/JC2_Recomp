@@ -1,19 +1,31 @@
-// Jade Cocoon 2 (SLUS-20309) on BozoEngine: the game's recompiled code over native services. Headless for now.
+// Jade Cocoon 2 (SLUS-20309) on BozoEngine: the game's recompiled code over native services. jc2 opens the window
+// (SDL3, OpenGL 3.3: BozoEngine's platform layer); jc2-headless runs without one (checks, scripted runs).
 #include "bozo/ee/dispatcher.h"
 #include "bozo/host/free_host.h"
 #include "bozo/libs/libraries.h"
 #include "bozo/port.h"
 #include "jc2_functions.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <vector>
+#ifdef JC2_WITH_WINDOW
+#include "bozo/app/app.h"
+#include "bozo/app/audio_device.h"
+#include "bozo/app/device_pad.h"
+#include "bozo/app/frame_pacer.h"
+#include "bozo/app/video_settings.h"
+#include "bozo/app/window.h"
+#include <filesystem>
+#endif
 
 namespace jc2
 {
     void install(Runtime &, bozo::port::Registry &);
     void installAudio(bozo::libs::Libraries &, bool trace);
+    void installDraw(Runtime &, bozo::port::Registry &);
 } // namespace jc2
 
 static int run(int argc, char **argv)
@@ -24,7 +36,16 @@ static int run(int argc, char **argv)
     options.elf = JC2_DEFAULT_ELF;
     options.symbolMap = JC2_SYMBOL_MAP;
     options.iso = JC2_DEFAULT_ISO;
-    options.frames = 600;
+    bool window = false;
+#ifdef JC2_WITH_WINDOW
+    window = true;
+    bozo::app::setIdentity({"Jade Cocoon 2", "JC2_Recomp", "jc2-recomp", "SLUS_203.09"});
+    bozo::app::WindowOptions windowOptions;
+    windowOptions.title = "Jade Cocoon 2 - BozoEngine";
+    windowOptions.width = 960;
+    windowOptions.height = 720;
+#endif
+    options.frames = window ? 0 : 600;
     options.printGameOutput = true;
     std::string dumpRam; // EE RAM at the end of the run (a fault, the frame limit): the boundary to analyse offline
     for (int i = 1; i < argc; ++i)
@@ -46,6 +67,20 @@ static int run(int argc, char **argv)
             dumpRam = argv[++i];
         else if (a == "--profile-io")
             options.profileIo = true;
+        else if (a == "--headless")
+            window = false;
+#ifdef JC2_WITH_WINDOW
+        else if (a == "--no-vsync")
+            windowOptions.vsync = false;
+        else if (a == "--fullscreen")
+            windowOptions.fullscreen = true;
+        else if (a == "--capture-dir" && i + 1 < argc)
+            windowOptions.captureDir = argv[++i];
+        else if (a == "--capture-frame" && i + 1 < argc)
+            windowOptions.captureFrames.push_back(std::stoull(argv[++i]));
+        else if (a == "--quit-after" && i + 1 < argc)
+            windowOptions.quitAfterFrames = std::stoull(argv[++i]);
+#endif
         else
         {
             std::fprintf(stderr, "Usage: jc2-headless [--frames N] [--pad-script FILE] [--card-dir DIR] [--elf FILE]\n"
@@ -53,11 +88,18 @@ static int run(int argc, char **argv)
             return a == "--help" ? 0 : 2;
         }
     }
+#ifdef JC2_WITH_WINDOW
+    // A played run keeps its saves: the user folder's memory cards unless --card-dir names others.
+    if (window && options.cardDir.empty())
+        options.cardDir = bozo::app::userDirectory().string();
+#endif
+    options.realTime = window;
     bozo::host::FreeHost host(options);
     bozo::ee::Dispatcher d(host);
     d.setFunctions(jc2_function_table, jc2_function_count, jc2_resume_table, jc2_resume_count);
     bozo::port::Registry registry;
     jc2::install(d.runtime(), registry);
+    jc2::installDraw(d.runtime(), registry);
     // JC2_TRACE_SIF=1: the IOP modules the game asks for and the RPC services it binds.
     const bool traceSif = std::getenv("JC2_TRACE_SIF") != nullptr;
     jc2::installAudio(host.libraries(), traceSif);
@@ -67,41 +109,85 @@ static int run(int argc, char **argv)
         std::fprintf(stderr, "%s\n", error.c_str());
         return 2;
     }
+#ifdef JC2_WITH_WINDOW
+    bozo::app::FramePacer pacer;
+    pacer.setPaced(window);
+    bozo::app::DevicePad devices;
+    bozo::app::AudioDevice audio;
+    if (window && options.padScript.empty())
+        host.libraries().pad.input = &devices;
+    host.onAudio = [&](uint64_t, const int16_t *pcm, size_t count)
+    {
+        if (window)
+            audio.push(pcm, count);
+    };
+#endif
     host.onFrame = [&](uint64_t f, const R5900Context *ctx)
     {
+#ifdef JC2_WITH_WINDOW
+        pacer.frameEnd();
+#endif
         if (f % 60 == 0)
             std::printf("[jc2] frame=%llu pc=%x cycles=%llu\n", (unsigned long long)f, ctx->pc,
                         (unsigned long long)d.now());
     };
-    uint64_t frames = 0;
-    try
+    auto play = [&]() -> int
     {
-        frames = host.run();
-    }
-    catch (const std::exception &e)
-    {
-        std::fprintf(stderr, "[jc2] native failure: %s\n", e.what());
-        return 1;
-    }
-    if (!dumpRam.empty())
-        if (FILE *f = std::fopen(dumpRam.c_str(), "wb"))
+#ifdef JC2_WITH_WINDOW
+        if (window)
+            audio.open();
+#endif
+        uint64_t frames = 0;
+        try
         {
-            std::fwrite(d.runtime().memory.ram(), 1, 0x2000000u, f);
-            std::fclose(f);
+            frames = host.run();
         }
-    std::printf("[jc2] frames=%llu end=%s\n", (unsigned long long)frames, host.endReason().c_str());
-    const auto &stats = host.stats();
-    std::printf("[jc2] compatibility: %llu register accesses, %llu unknown; %llu native VU0 calls\n",
-                (unsigned long long)stats.ioAccesses, (unsigned long long)stats.ioUnknown,
-                (unsigned long long)stats.vu0Calls);
-    std::printf("[jc2] calls: %llu kernel, %llu library, %llu port overrides\n", (unsigned long long)stats.kernelCalls,
-                (unsigned long long)stats.libraryCalls, (unsigned long long)stats.overrideCalls);
-    for (const auto &[name, count] : stats.unanswered)
-        std::printf("[jc2] unanswered: %s x%llu\n", name.c_str(), (unsigned long long)count);
-    for (const auto &[site, counts] : stats.ioSites)
-        std::printf("[jc2:io] pc=%08x address=%08x reads=%llu writes=%llu %s\n", site.first, site.second,
-                    (unsigned long long)counts[0], (unsigned long long)counts[1], host.functionAt(site.first).c_str());
-    return host.endReason().rfind("FAULT:", 0) == 0 ? 1 : 0;
+        catch (const std::exception &e)
+        {
+            std::fprintf(stderr, "[jc2] native failure: %s\n", e.what());
+            return 1;
+        }
+        if (!dumpRam.empty())
+            if (FILE *f = std::fopen(dumpRam.c_str(), "wb"))
+            {
+                std::fwrite(d.runtime().memory.ram(), 1, 0x2000000u, f);
+                std::fclose(f);
+            }
+        std::printf("[jc2] frames=%llu end=%s\n", (unsigned long long)frames, host.endReason().c_str());
+        const auto &stats = host.stats();
+        std::printf("[jc2] compatibility: %llu register accesses, %llu unknown; %llu native VU0 calls\n",
+                    (unsigned long long)stats.ioAccesses, (unsigned long long)stats.ioUnknown,
+                    (unsigned long long)stats.vu0Calls);
+        std::printf("[jc2] calls: %llu kernel, %llu library, %llu port overrides\n", (unsigned long long)stats.kernelCalls,
+                    (unsigned long long)stats.libraryCalls, (unsigned long long)stats.overrideCalls);
+        // JC2_CALL_STATS=1: the native library calls by function, most first.
+        if (std::getenv("JC2_CALL_STATS"))
+        {
+            std::vector<std::pair<uint64_t, std::string>> byName;
+            for (const auto &[name, count] : stats.libraryByName)
+                byName.emplace_back(count, name);
+            std::sort(byName.rbegin(), byName.rend());
+            for (const auto &[count, name] : byName)
+                std::printf("[jc2:lib] %10llu %s\n", (unsigned long long)count, name.c_str());
+        }
+        for (const auto &[name, count] : stats.unanswered)
+            std::printf("[jc2] unanswered: %s x%llu\n", name.c_str(), (unsigned long long)count);
+        for (const auto &[site, counts] : stats.ioSites)
+            std::printf("[jc2:io] pc=%08x address=%08x reads=%llu writes=%llu %s\n", site.first, site.second,
+                        (unsigned long long)counts[0], (unsigned long long)counts[1], host.functionAt(site.first).c_str());
+        return host.endReason().rfind("FAULT:", 0) == 0 ? 1 : 0;
+    };
+#ifdef JC2_WITH_WINDOW
+    if (window)
+    {
+        bozo::app::Game game;
+        game.run = play;
+        game.stop = [&] { host.requestStop(); };
+        game.framesEnded = [&] { return host.framesEnded(); };
+        return bozo::app::runWindow(windowOptions, game, &devices);
+    }
+#endif
+    return play();
 }
 
 int main(int argc, char **argv)
