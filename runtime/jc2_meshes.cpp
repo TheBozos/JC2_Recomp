@@ -46,6 +46,7 @@ namespace jc2
 
         Runtime *g_rt = nullptr;
         const bool traceLoad = std::getenv("JC2_TRACE_LOAD") != nullptr;
+        const bool traceEffects = std::getenv("JC2_TRACE_FX") != nullptr;
         const bool meshesOff = [] {
             const char *v = std::getenv("JC2_NATIVE_MESHES");
             return v && v[0] == '0';
@@ -544,6 +545,8 @@ namespace jc2
             }
             batch.blended = (material.prim & 0x40u) != 0;
             batch.setsAlpha = batch.setsTest = true;
+            batch.setsZbuf = true; // the models write depth (ZBUF.ZMSK off): the submitter keeps the last batch's otherwise
+            batch.depthMasked = false;
             batch.alpha = material.alpha;
             batch.test = material.test;
 
@@ -782,6 +785,371 @@ namespace jc2
             rt->functions.generated(kShadow)(ram, ctx, rt);
         }
 
+        // ---- The screen fade: 0x22CF10(corner colour, centre colour) ----
+        // A full-screen fan in buffer 1: the centre (2048, 2048) in one colour, the four corners of the field
+        // (1728..2368, 1936..2160) in the other; colours are four ints (r, g, b, alpha 0x80 = 1.0); PRIM 0x4D (fan,
+        // Gouraud, blended), ALPHA 0x44 ((Cs - Cd) As + Cd), Z test ALWAYS. Drawn after the frame's 3D, before the 2D.
+        constexpr uint32_t kScreenFade = 0x0022CF10u;
+        struct ScreenFade
+        {
+            uint32_t corner, centre; // RGBA bytes, alpha 0x80 = 1.0
+        };
+        std::vector<ScreenFade> g_fades;
+
+        uint32_t fadeColour(const uint8_t *ram, uint32_t at4)
+        {
+            uint32_t c = 0;
+            for (int k = 0; k < 4; ++k)
+                c |= std::min<uint32_t>(r32(ram, at4 + 4u * k), 255u) << (8 * k);
+            return c;
+        }
+        void screenFade(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+        {
+            static const bool fadeOff = [] {
+                const char *v = std::getenv("JC2_FADE");
+                return v && v[0] == '0';
+            }();
+            const ScreenFade f{fadeColour(ram, ctx->r[4].uw[0]), fadeColour(ram, ctx->r[5].uw[0])};
+            static uint64_t calls = 0;
+            if (traceEffects && calls++ % 300 == 0)
+                std::printf("[jc2:fx] fade corner %08x centre %08x (raw %08x %08x %08x %08x)\n", f.corner, f.centre,
+                            r32(ram, ctx->r[4].uw[0]), r32(ram, ctx->r[4].uw[0] + 4), r32(ram, ctx->r[4].uw[0] + 8),
+                            r32(ram, ctx->r[4].uw[0] + 12));
+            if (!meshesOff && !fadeOff)
+                g_fades.push_back(f);
+            rt->functions.generated(kScreenFade)(ram, ctx, rt);
+        }
+        void drawFades()
+        {
+            static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+            for (const ScreenFade &f : g_fades)
+            {
+                if ((f.corner >> 24) == 0 && (f.centre >> 24) == 0)
+                    continue;
+                bozo::render::Material m;
+                m.textured = false;
+                m.directColour = true;
+                m.blend = bozo::render::Material::Blend::Alpha;
+                m.depthTest = false;
+                m.depthWrite = false;
+                auto vtx = [](float x, float y, uint32_t rgba) {
+                    bozo::render::Vertex v;
+                    v.x = x;
+                    v.y = 2.0f * y - 2048.0f; // the field's line to the frame's
+                    v.z = 0;
+                    v.rgba = rgba;
+                    return v;
+                };
+                const bozo::render::Vertex c = vtx(2048, 2048, f.centre), a = vtx(1728, 1936, f.corner),
+                                           b = vtx(2368, 1936, f.corner), d = vtx(2368, 2160, f.corner),
+                                           e = vtx(1728, 2160, f.corner);
+                const bozo::render::Vertex tris[12] = {c, a, b, c, b, d, c, d, e, c, e, a};
+                bozo::render::Renderer::instance().draw(m, identity, tris, 12);
+            }
+            g_fades.clear();
+        }
+
+        // ---- Effects: the primitive drawer 0x146990(obj, texture record, TIM2, camera, pass, picture) ----
+        // VU1 program C, by the obj's flags (+0): 8 the shadows (above, from their own call), 4 camera-facing sprites
+        // (particles, model emitters), 0x10 2D parallelograms (overlay glows), 0x400 screen sprites (the depth of field,
+        // below, from its own call); no other path is used. obj: +4 blend (ALPHA: 0 0x48 additive, 1 0x42 subtractive,
+        // 2 0x44 alpha, 4 0x54 by destination alpha, 5 0x40_00000046), +8 textured, +0x30 records (3 qwords each), +0x34
+        // their count, +0x40 W. The pass (t0) is PRIM.ABE. TEST: flags 0x10000 alpha >= 0x20 and Z written, 0x8000 no Z
+        // test, else Z GEQUAL without writing. Texture: picture t1 of the TIM2 a2, else the record a1's (its bank slot's
+        // TIM2); the record's rectangle is the whole picture.
+        constexpr uint32_t kPrimitiveDrawer = 0x00146990u;
+        struct ScreenDraw
+        {
+            bozo::render::Material material;
+            std::shared_ptr<const bozo::render::Texture> texture;
+            std::vector<bozo::render::Vertex> vertices;
+        };
+        std::vector<ScreenDraw> g_effects;
+        uint64_t g_effectDraws = 0;
+        std::map<uint64_t, std::shared_ptr<const bozo::render::Texture>> g_effectTextures;
+
+        std::shared_ptr<const bozo::render::Texture> recordTexture(const uint8_t *ram, uint32_t record, uint32_t tim2,
+                                                                  int32_t picture)
+        {
+            if (tim2 && picture >= 0)
+            {
+                const uint64_t key = 0x3F00000000000000ull | uint64_t(tim2) << 12 | uint32_t(picture & 0xFFF);
+                auto found = g_effectTextures.find(key);
+                if (found != g_effectTextures.end())
+                    return found->second;
+                const std::vector<uint32_t> pictures = tim2Pictures(ram, tim2);
+                auto texture = size_t(picture) < pictures.size() ? decodeTim2Picture(at(ram, pictures[picture]), 0, key) : nullptr;
+                g_effectTextures[key] = texture;
+                return texture;
+            }
+            // A resident record: the bank slot holding it.
+            for (uint32_t bank = 0; bank < 4; ++bank)
+            {
+                const uint32_t entry = kTextureBanks + bank * 52u, mask = r32(ram, entry + 0x18);
+                for (uint32_t slot = 0; slot < 4; ++slot)
+                {
+                    if (!(mask & (1u << slot)))
+                        continue;
+                    const uint32_t at = entry + 0x1C + slot * 12u, count = r32(ram, at + 4), records = r32(ram, at + 8);
+                    if (record < records || record >= records + count * 0x60u || (record - records) % 0x60u)
+                        continue;
+                    uint8_t material[0x10] = {};
+                    material[0xC] = static_cast<uint8_t>(bank), material[0xD] = static_cast<uint8_t>(slot);
+                    const uint32_t index = (record - records) / 0x60u;
+                    material[0xE] = static_cast<uint8_t>(index), material[0xF] = static_cast<uint8_t>(index >> 8);
+                    const TextureView *view = materialTexture(ram, material);
+                    return view ? view->texture : nullptr;
+                }
+            }
+            return nullptr;
+        }
+
+        bozo::render::Material effectMaterial(uint32_t flags, uint32_t blend, bool textured, bool pass)
+        {
+            static const uint64_t kAlphas[6] = {0x48, 0x42, 0x44, 0x44, 0x54, 0x4000000046ull};
+            const uint64_t alpha = kAlphas[blend < 6 ? blend : 2];
+            bozo::render::Material m;
+            m.textured = textured;
+            m.directColour = !textured;
+            m.clampU = m.clampV = true;
+            if (pass)
+            {
+                m.gsBlend = true;
+                m.blendA = alpha & 3u, m.blendB = (alpha >> 2) & 3u, m.blendC = (alpha >> 4) & 3u, m.blendD = (alpha >> 6) & 3u;
+                m.blendFix = static_cast<uint8_t>(alpha >> 32);
+            }
+            else
+                m.blend = bozo::render::Material::Blend::Opaque;
+            if (flags & 0x10000u)
+            {
+                m.alphaTest = true;
+                m.alphaFunc = bozo::render::Material::AlphaFunc::GreaterEqual;
+                m.alphaRef = 0x20;
+                m.depthWrite = true;
+            }
+            else if (flags & 0x8000u)
+                m.depthTest = false, m.depthWrite = false;
+            else
+                m.depthWrite = false;
+            return m;
+        }
+
+        // A GS point of program C's projection (P V W, field y) to the frame's (y' = 2 y - 2048).
+        bool project(const Mat &pvw, const float p[3], float out[3], float &w)
+        {
+            const float v[4] = {p[0], p[1], p[2], 1.0f};
+            float g[4];
+            apply(pvw, v, g);
+            w = g[3];
+            if (w <= 1e-6f)
+                return false;
+            out[0] = g[0] / w, out[1] = 2.0f * (g[1] / w) - 2048.0f, out[2] = g[2] / w;
+            return true;
+        }
+        bool insideClip(const Mat &cw, const float p[3])
+        {
+            const float v[4] = {p[0], p[1], p[2], 1.0f};
+            float c[4];
+            apply(cw, v, c);
+            const float aw = std::fabs(c[3]);
+            return std::fabs(c[0]) <= aw && std::fabs(c[1]) <= aw && std::fabs(c[2]) <= aw;
+        }
+
+        void primitiveDrawer(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+        {
+            const uint32_t obj = ctx->r[4].uw[0];
+            const uint32_t flags = r32(ram, obj);
+            const uint32_t path = flags & 0x1C1Fu & ~8u; // the program C path bits other than the shadow's
+            if (!meshesOff && (flags & 8u) == 0 && (flags & 0x400u) == 0 && (path & (4u | 0x10u)))
+            {
+                const uint32_t camera = r32(ram, 0x006CC5F4u + 4u * (ctx->r[7].uw[0] & 3u));
+                const uint32_t records = r32(ram, obj + 0x30), count = std::min<uint32_t>(r32(ram, obj + 0x34), 500u);
+                const bool textured = r32(ram, obj + 8) != 0, pass = ctx->r[8].uw[0] != 0;
+                std::shared_ptr<const bozo::render::Texture> texture;
+                if (textured)
+                    texture = recordTexture(ram, ctx->r[5].uw[0], ctx->r[6].uw[0], static_cast<int32_t>(ctx->r[9].uw[0]));
+                ScreenDraw draw;
+                draw.material = effectMaterial(flags, ram[obj + 4], textured && texture, pass);
+                draw.texture = texture;
+                if (draw.material.textured)
+                    draw.material.tex0 = texture->key;
+                auto vtx = [](float x, float y, float z, float u, float v, uint32_t rgba) {
+                    bozo::render::Vertex out;
+                    out.x = x, out.y = y, out.z = z, out.u = u, out.v = v, out.rgba = rgba;
+                    return out;
+                };
+                auto colour = [&](uint32_t q) {
+                    uint32_t c = 0;
+                    for (int k = 0; k < 4; ++k)
+                        c |= static_cast<uint32_t>(std::clamp(rf(ram, q + 4u * k), 0.0f, 255.0f)) << (8 * k);
+                    return c;
+                };
+                if ((path & 4u) && camera)
+                {
+                    // Camera-facing sprites: q0 (p, s), q1 colour. Corners A = p - s/2 (r0 + r1), B = p + s/2 (r0 + r1),
+                    // r0, r1 the first two rows of V W's 3 x 3; a screen rectangle from A (UV 1, 1) to B (UV 0, 0) at
+                    // B's depth; dropped when A or B is outside the clip volume.
+                    const Mat world = readMat(ram, obj + 0x40), view = readMat(ram, camera + 0x130);
+                    const Mat vw = mul(view, world), pvw = mul(readMat(ram, camera + 0x170), vw);
+                    const Mat cw = mul(readMat(ram, camera + 0x230), world);
+                    const float d[3] = {vw.m[0] + vw.m[1], vw.m[4] + vw.m[5], vw.m[8] + vw.m[9]}; // rows 0 + 1
+                    for (uint32_t i = 0; i < count; ++i)
+                    {
+                        const uint32_t q = records + 48u * i;
+                        const float s = rf(ram, q + 12) * 0.5f;
+                        const float p[3] = {rf(ram, q), rf(ram, q + 4), rf(ram, q + 8)};
+                        const float a[3] = {p[0] - s * d[0], p[1] - s * d[1], p[2] - s * d[2]};
+                        const float b[3] = {p[0] + s * d[0], p[1] + s * d[1], p[2] + s * d[2]};
+                        if (!insideClip(cw, a) || !insideClip(cw, b))
+                            continue;
+                        float sa[3], sb[3], wa, wb;
+                        if (!project(pvw, a, sa, wa) || !project(pvw, b, sb, wb))
+                            continue;
+                        const uint32_t c = colour(q + 16);
+                        const float z = sb[2];
+                        const auto v0 = vtx(sa[0], sa[1], z, 1, 1, c), v1 = vtx(sb[0], sa[1], z, 0, 1, c),
+                                   v2 = vtx(sa[0], sb[1], z, 1, 0, c), v3 = vtx(sb[0], sb[1], z, 0, 0, c);
+                        draw.vertices.insert(draw.vertices.end(), {v0, v1, v2, v1, v3, v2});
+                    }
+                }
+                else if (path & 0x10u)
+                {
+                    // 2D parallelograms in GS coordinates: q0 origin, q1 edges a (x, y) and b (z, w), q2 (fu, fv, -,
+                    // alpha): o, o + a, o + b, o + a + b with UV (0, 0) (fu, 0) (0, fv) (fu, fv); colour 128 grey.
+                    for (uint32_t i = 0; i < count; ++i)
+                    {
+                        const uint32_t q = records + 48u * i;
+                        const float ox = rf(ram, q), oy = rf(ram, q + 4), oz = rf(ram, q + 8);
+                        const float ax = rf(ram, q + 16), ay = rf(ram, q + 20), bx = rf(ram, q + 24), by = rf(ram, q + 28);
+                        const float fu = rf(ram, q + 32), fv = rf(ram, q + 36);
+                        const uint32_t c = 0x00808080u | std::min<uint32_t>(static_cast<uint32_t>(std::max(0.0f, rf(ram, q + 44))), 255u) << 24;
+                        auto f = [](float y) { return 2.0f * y - 2048.0f; };
+                        const auto v0 = vtx(ox, f(oy), oz, 0, 0, c), v1 = vtx(ox + ax, f(oy + ay), oz, fu, 0, c),
+                                   v2 = vtx(ox + bx, f(oy + by), oz, 0, fv, c),
+                                   v3 = vtx(ox + ax + bx, f(oy + ay + by), oz, fu, fv, c);
+                        draw.vertices.insert(draw.vertices.end(), {v0, v1, v2, v1, v3, v2});
+                    }
+                }
+                if (!draw.vertices.empty())
+                {
+                    ++g_effectDraws;
+                    g_effects.push_back(std::move(draw));
+                }
+            }
+            rt->functions.generated(kPrimitiveDrawer)(ram, ctx, rt);
+        }
+
+        void drawEffects()
+        {
+            static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+            for (const ScreenDraw &d : g_effects)
+                bozo::render::Renderer::instance().draw(d.material, identity, d.vertices.data(),
+                                                        static_cast<uint32_t>(d.vertices.size()), d.texture);
+            g_effects.clear();
+        }
+
+        // ---- Depth of field: 0x494200(table, f12 strength) ----
+        // The DOF task (0x492DF0, mode != 0) gives a table of four {alpha - 1 (byte), GS Z} at a0: (1e7, base), (Z
+        // near, in focus), (Z far, base), (0, base), the band around the focused actor. The game writes them as
+        // full-screen sprites into the frame's destination alpha (Z GEQUAL: a sprite marks the pixels it is not behind,
+        // the last one wins), then blurs the frame by six passes over itself, each C += (shift(C) - C) Ad, the shifts
+        // (-+sqrt(3) S, -+S/2 field lines), (0, +-S/2), S = 1.5 strength. Here the mask is aux image 1, drawn by a
+        // depth lookup over the frame's depth (bucket weights from the same sprite rule), and each pass samples the
+        // frame drawn so far with its alpha from the mask.
+        constexpr uint32_t kDepthOfField = 0x00494200u;
+        struct DepthOfField
+        {
+            bool on = false;
+            uint32_t z[4] = {}, alpha[4] = {};
+            float strength = 0;
+        } g_dof;
+        const bool dofOff = [] {
+            const char *v = std::getenv("JC2_DOF");
+            return v && v[0] == '0';
+        }();
+
+        void depthOfField(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+        {
+            const uint32_t table = ctx->r[4].uw[0];
+            if (!meshesOff && !dofOff && r32(ram, 0x006CC5F4u))
+            {
+                g_dof.on = true;
+                for (int i = 0; i < 4; ++i)
+                {
+                    g_dof.alpha[i] = (r32(ram, table + 8u * i) & 0xFFu) + 1u;
+                    g_dof.z[i] = r32(ram, table + 8u * i + 4u);
+                }
+                g_dof.strength = ctx->f[12];
+                static uint64_t calls = 0;
+                if (traceEffects && calls++ % 300 == 0)
+                    std::printf("[jc2:fx] dof strength %g: (%u, %u) (%u, %u) (%u, %u) (%u, %u)\n", g_dof.strength, g_dof.z[0],
+                                g_dof.alpha[0], g_dof.z[1], g_dof.alpha[1], g_dof.z[2], g_dof.alpha[2], g_dof.z[3], g_dof.alpha[3]);
+            }
+            rt->functions.generated(kDepthOfField)(ram, ctx, rt);
+        }
+
+        void drawDepthOfField()
+        {
+            if (!g_dof.on)
+                return;
+            g_dof.on = false;
+            auto &renderer = bozo::render::Renderer::instance();
+            static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+            // The mask: bucket i of the depth lookup covers GS Z [i, i + 1) x zUnit; Z near on bucket 200.
+            const float depthMax = 16777215.0f;
+            const float zNear = std::max<float>(1.0f, static_cast<float>(g_dof.z[1]));
+            auto processing = std::make_shared<bozo::render::Material::ImageProcessing>();
+            processing->depthLookup = true;
+            processing->depthScale = 200.0f * depthMax / zNear;
+            const float zUnit = zNear / 200.0f;
+            for (int i = 0; i < 256; ++i)
+            {
+                const float z = (i + 0.5f) * zUnit;
+                uint32_t alpha = 32; // the first sprite's (1e7)
+                for (int k = 0; k < 4; ++k)
+                    if (static_cast<float>(g_dof.z[k]) >= z)
+                        alpha = g_dof.alpha[k];
+                processing->depthWeights[i] = std::min(1.0f, alpha / 128.0f);
+            }
+            auto vtx = [](float x, float y, float u, float v) {
+                bozo::render::Vertex out;
+                out.x = x, out.y = y, out.z = 0, out.u = u, out.v = v, out.rgba = 0x80808080u;
+                return out;
+            };
+            const float x0 = 1728, y0 = 1824, x1 = 2368, y1 = 2272;
+            {
+                bozo::render::Material m;
+                m.target = 1;
+                m.textured = false;
+                m.blend = bozo::render::Material::Blend::Opaque;
+                m.depthTest = false, m.depthWrite = false;
+                m.imageProcessing = processing;
+                const bozo::render::Vertex q[6] = {vtx(x0, y0, 0, 0), vtx(x1, y0, 0, 0), vtx(x0, y1, 0, 0),
+                                                   vtx(x1, y0, 0, 0), vtx(x1, y1, 0, 0), vtx(x0, y1, 0, 0)};
+                renderer.draw(m, identity, q, 6);
+            }
+            auto alphaFromMask = std::make_shared<bozo::render::Material::ImageProcessing>();
+            alphaFromMask->alphaSource = 1;
+            alphaFromMask->alphaScale = 1.0f;
+            const float s = 1.5f * g_dof.strength, sx = 1.7320508f * s, sy = s; // half a field line = one frame line
+            const float offsets[6][2] = {{-sx, -sy}, {sx, -sy}, {0, sy}, {-sx, sy}, {sx, sy}, {0, -sy}};
+            for (const auto &o : offsets)
+            {
+                bozo::render::Material m;
+                m.sampleTarget = true;
+                m.textured = true;
+                m.textureAlpha = false;
+                m.blend = bozo::render::Material::Blend::Alpha;
+                m.colourMask = 0x7u;
+                m.depthTest = false, m.depthWrite = false;
+                m.imageProcessing = alphaFromMask;
+                const bozo::render::Vertex q[6] = {vtx(x0, y0, o[0], o[1]), vtx(x1, y0, 640 + o[0], o[1]),
+                                                   vtx(x0, y1, o[0], 448 + o[1]), vtx(x1, y0, 640 + o[0], o[1]),
+                                                   vtx(x1, y1, 640 + o[0], 448 + o[1]), vtx(x0, y1, o[0], 448 + o[1])};
+                renderer.draw(m, identity, q, 6);
+            }
+        }
+
         bozo::render::MeshSubmitter g_submitter;
     } // namespace
 
@@ -792,6 +1160,9 @@ namespace jc2
             g_submitter.submit(d);
         for (const auto &d : g_blended)
             g_submitter.submit(d);
+        drawEffects();
+        drawDepthOfField();
+        drawFades();
         if (++g_frames % 600 == 0 && (g_drawn || g_missing))
             std::printf("[jc2:meshes] frames %llu: %llu parts drawn, %llu not found, %llu shadows (%llu calls, %llu without the bit, %llu culled, "
                         "%llu without a texture)\n",
@@ -818,5 +1189,8 @@ namespace jc2
         r.registerFunction(kSkinnedMaterial, skinnedMaterial);
         r.registerFunction(kSkinnedCall, skinnedCall);
         r.registerFunction(kShadow, shadow);
+        r.registerFunction(kScreenFade, screenFade);
+        r.registerFunction(kPrimitiveDrawer, primitiveDrawer);
+        r.registerFunction(kDepthOfField, depthOfField);
     }
 } // namespace jc2

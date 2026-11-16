@@ -548,3 +548,17 @@ Mapped from a RAM dump of the first scene and the disc (subagent analysis, `buil
   ALPHA (0 - Cd) As + Cd, depth test without write. Analysis: `build/bozo/analysis5` (program C emulated, the
   EE-side rebuild matches it exactly). 0x146990's other callers (effects) and the screen passes (0x22CF10 fade, a
   depth mask and a blur in program C screen-space mode) are not ported.
+- **Effects** (2026-11-16, analysis `build/bozo/analysis6`): the primitive drawer 0x146990 (VU1 program C) is only used
+  with flags 8 (shadows), 4 (camera-facing sprites: particles attached to actors, emitters in models), 0x10 (2D
+  parallelograms: overlay glows) and 0x400 (screen sprites: the depth of field); every program C path was checked
+  against the microcode (vu1.py) on random inputs. Native: flags 4 and 0x10 at 0x146990 itself (blend from obj +4 as
+  the GS's ALPHA, depth test from the flags, texture from the record's bank slot or the call's TIM2 picture); not yet
+  seen on screen (the first scene has none).
+- **Screen passes**: 0x22CF10(corner, centre) is a vignette (a full-screen fan, colours as four ints; the first scene's
+  is brown at alpha 0x28 in the corners, clear in the centre). 0x494200(table, f12 strength) is the depth of field
+  (task 0x492DF0): a band of GS Z around the focused actor stays sharp, the rest blurred by six passes over the frame
+  (offsets +-sqrt(3) S, +-S/2 field lines; S = 1.5 strength), each mixing by the mask's alpha. Native: aux image 1 = the
+  mask by a depth lookup on the frame's depth (the game's sprite rule per bucket), six frame-sampling draws with their
+  alpha from it. JC2_DOF=0 / JC2_FADE=0 turn them off; JC2_TRACE_FX=1 logs their parameters.
+- The model batches set the depth write themselves (the mesh submitter keeps the last batch's ZBUF: after the first
+  shadow, nothing wrote depth and the shop counter was drawn over).
