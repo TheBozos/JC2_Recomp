@@ -473,3 +473,8 @@ each tile samples its own picture from its origin. A resource not uploaded yet g
 (its upload fills the records), as a tail call.
 Result: the Genki logo, the title (PRESS START BUTTON) and the main menu's frames and cursor draw in the window. Not
 yet: the menu's labels (another routine), rotation (+0x2C), mip shift (+0x1C).
+- **Menu text and box fills** (same day): text 0x1636E0 (a grid bitmap font: slots at 0x86A900, charset strings,
+  colour codes 0xB1-0xB9 and the 9-entry colour table at 0x4E7FA0, alignment, fonts 0x625-0x627 read from the disc's
+  CDDATA since the game frees them after its GS upload) and box fills 0x167270 (four-corner gradient, style insets at
+  0x4E80D0). The main menu (New game / Continue / Battle Arena) draws complete. Font slot 3 (digits) and the boxes'
+  animated size are not done yet.

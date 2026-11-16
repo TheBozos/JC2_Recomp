@@ -23,9 +23,9 @@ Not an emulator: the game's own MIPS R5900 code, rebuilt as a native program on 
 ## Status
 
 **Moving to BozoEngine (2026-11-15).** The port now builds on [BozoEngine](https://github.com/TheBozos/BozoEngine), The
-Bozos' own toolchain with no PS2 hardware at any level, in place of the PS2Recomp fork. The game boots headless on it:
-600 frames, the sound and i-mode drivers compiled to native code, no unknown device access. There is no picture yet: the
-draws are being ported to native renderer calls. The PS2Recomp notes below describe the previous build, kept until the
+Bozos' own toolchain with no PS2 hardware at any level, in place of the PS2Recomp fork. In its window the intro movie
+(with its music), the title and the main menu are drawn natively from the game's own data; what follows the menu is
+being ported, one draw family at a time. The PS2Recomp notes below describe the previous build, kept until the
 BozoEngine one draws. Build: `cmake -S . -B build/bozo_game -G Ninja && cmake --build build/bozo_game` (the disc files in
 `game/`), then `build/bozo_game/jc2-headless --frames 600`.
 
@@ -72,7 +72,13 @@ what remains open.
 
 ## Screenshots
 
-The first in-game scenes on the full native path (native GS renderer, native IOP modules, recompiled overlays), up to the Wormhole Forest:
+On BozoEngine (2026-11-16): the intro movie, the title and the main menu, drawn natively (no GS):
+
+| | |
+|---|---|
+| ![The title screen on BozoEngine](docs/screenshots/bozo-title.png) | ![The main menu on BozoEngine](docs/screenshots/bozo-main-menu.png) |
+
+On the previous PS2Recomp build, the first in-game scenes on the full native path (native GS renderer, native IOP modules, recompiled overlays), up to the Wormhole Forest:
 
 | | | |
 |---|---|---|
