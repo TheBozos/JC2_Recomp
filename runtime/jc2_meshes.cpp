@@ -20,6 +20,8 @@
 #include "bozo/render/mesh_draw.h"
 #include "bozo/render/mesh_pack.h"
 #include "bozo/render/renderer.h"
+#include "bozo/render/texture.h"
+#include <memory>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -36,6 +38,8 @@
 
 namespace jc2
 {
+    std::shared_ptr<const bozo::render::Texture> decodeTim2Picture(const uint8_t *header, uint32_t palette, uint64_t key);
+
     namespace
     {
         namespace packs = bozo::render::packs;
@@ -252,10 +256,76 @@ namespace jc2
             rt->functions.generated(kRequestDone)(ram, ctx, rt);
         }
 
-        // 0x13DAE0(bank, slot, count, records, tim2): a texture slot registered (bring-up trace).
+        // ---- Textures ----
+        // A material's texture: bank +0xC, slot +0xD, index +0xE (u16). Bank table 0x6CC5F0, 52 bytes a bank: +0x18
+        // the slots' mask, +0x1C + 12 slot {TIM2, count, records}; record = records + 0x60 index: +0x10 the picture's
+        // place in its GS page (x low half, y high half), +0x14 its size (w low, h high), +0x20 TEX0 (the page: TW, TH).
+        // The picture is the slot's TIM2's picture `index`. A slot registered without its TIM2 (a room's: uploaded at
+        // load) is matched to a TIM2 sub-file of a loaded resource with the same pictures (count and first size).
+        constexpr uint32_t kTextureBanks = 0x006CC5F0u;
+        struct TextureView
+        {
+            std::shared_ptr<const bozo::render::Texture> texture;
+            float su = 1, ou = 0, sv = 1, ov = 0; // picture u = s su + ou, v = t sv + ov
+            uint64_t key = 0;
+        };
+        std::map<uint32_t, TextureView> g_textures; // by record address; cleared when a slot is registered
+        uint64_t g_textureGeneration = 1;
+
+        // The TIM2's picture headers.
+        std::vector<uint32_t> tim2Pictures(const uint8_t *ram, uint32_t tim2)
+        {
+            std::vector<uint32_t> out;
+            if (!tim2 || std::memcmp(at(ram, tim2), "TIM2", 4) != 0)
+                return out;
+            const uint8_t *h = at(ram, tim2);
+            const uint32_t count = h[6] | h[7] << 8;
+            uint32_t p = tim2 + (h[5] ? 0x80u : 0x10u);
+            for (uint32_t k = 0; k < count && k < 4096u; ++k)
+            {
+                out.push_back(p);
+                const uint32_t total = r32(ram, p);
+                if (!total)
+                    break;
+                p += total;
+            }
+            return out;
+        }
+
+        // A TIM2 sub-file of a loaded resource whose pictures match a slot's records (count, first picture's size).
+        uint32_t findTim2(const uint8_t *ram, uint32_t count, uint32_t records)
+        {
+            const uint32_t size0 = r32(ram, records + 0x14);
+            for (const auto &[base, loaded] : g_loaded)
+            {
+                const uint32_t n = r32(ram, base);
+                if (!n || n > 64u)
+                    continue;
+                for (uint32_t i = 0; i < n; ++i)
+                {
+                    const uint32_t sub = base + r32(ram, base + 4 + 4 * i);
+                    if (sub >= base + loaded.size || std::memcmp(at(ram, sub), "TIM2", 4) != 0)
+                        continue;
+                    const uint8_t *h = at(ram, sub);
+                    if ((uint32_t(h[6]) | uint32_t(h[7]) << 8) != count)
+                        continue;
+                    const uint32_t p0 = sub + (h[5] ? 0x80u : 0x10u);
+                    const uint32_t w = r32(ram, p0 + 20) & 0xFFFFu, hh = r32(ram, p0 + 20) >> 16;
+                    if ((hh << 16 | w) == size0)
+                        return sub;
+                }
+            }
+            return 0;
+        }
+
+        const TextureView *materialTexture(const uint8_t *ram, const uint8_t *material);
+
+        // 0x13DAE0(bank, slot, count, records, tim2): a texture slot registered.
         constexpr uint32_t kTextureSlot = 0x0013DAE0u;
         void textureSlot(uint8_t *ram, R5900Context *ctx, Runtime *rt)
         {
+            g_textures.clear();
+            ++g_textureGeneration;
             if (traceLoad)
             {
                 const uint32_t records = ctx->r[7].uw[0];
@@ -267,6 +337,48 @@ namespace jc2
                             r32(ram, records + 0x20));
             }
             rt->functions.generated(kTextureSlot)(ram, ctx, rt);
+        }
+
+        const TextureView *materialTexture(const uint8_t *ram, const uint8_t *material)
+        {
+            const uint32_t bank = material[0xC], slot = material[0xD], index = material[0xE] | material[0xF] << 8;
+            if (bank > 3u || slot > 3u)
+                return nullptr;
+            const uint32_t entry = kTextureBanks + bank * 52u;
+            if (!(r32(ram, entry + 0x18) & (1u << slot)))
+                return nullptr;
+            const uint32_t slotAt = entry + 0x1C + slot * 12u;
+            uint32_t tim2 = r32(ram, slotAt);
+            const uint32_t count = r32(ram, slotAt + 4), records = r32(ram, slotAt + 8);
+            if (index >= count || !records)
+                return nullptr;
+            const uint32_t record = records + index * 0x60u;
+            auto found = g_textures.find(record);
+            if (found != g_textures.end())
+                return found->second.texture ? &found->second : nullptr;
+            TextureView &view = g_textures[record];
+            if (!tim2)
+                tim2 = findTim2(ram, count, records);
+            const std::vector<uint32_t> pictures = tim2Pictures(ram, tim2);
+            if (index >= pictures.size())
+            {
+                static int warned = 0;
+                if (warned++ < 8)
+                    std::fprintf(stderr, "[jc2:meshes] texture bank %u slot %u index %u: no TIM2 picture (tim2 %#x)\n", bank,
+                                 slot, index, tim2);
+                return nullptr;
+            }
+            view.key = 0x3D00000000000000ull | (g_textureGeneration << 32) | record;
+            view.texture = decodeTim2Picture(at(ram, pictures[index]), 0, view.key);
+            if (!view.texture)
+                return nullptr;
+            const uint64_t tex0 = r64(ram, record + 0x20);
+            const float pw = float(1u << ((tex0 >> 26) & 15u)), ph = float(1u << ((tex0 >> 30) & 15u));
+            const uint32_t place = r32(ram, record + 0x10);
+            const float w = float(view.texture->width), h = float(view.texture->height);
+            view.su = pw / w, view.ou = -float(place & 0xFFFFu) / w;
+            view.sv = ph / h, view.ov = -float(place >> 16) / h;
+            return &view;
         }
 
         // ---- The draws ----
@@ -314,11 +426,13 @@ namespace jc2
             uint32_t flags = 0;
             float colour[4] = {1, 1, 1, 1};
             uint64_t prim = 0, alpha = 0, test = 0;
+            const uint8_t *bytes = nullptr;
         };
         MaterialView currentMaterial(const uint8_t *ram)
         {
             MaterialView m;
             const uint8_t *p = g_materialIsCopy ? g_materialCopy : at(ram, g_material);
+            m.bytes = p;
             std::memcpy(&m.flags, p, 4);
             std::memcpy(m.colour, p + 0x10, 16);
             std::memcpy(&m.prim, p + 0x30, 8);
@@ -420,7 +534,14 @@ namespace jc2
             draw.object = resource;
             draw.offset = chain;
             bozo::render::MeshBatch batch;
-            batch.textured = false; // textures: next step
+            const TextureView *texture = (material.flags & 0x20u) ? materialTexture(ram, material.bytes) : nullptr;
+            batch.textured = texture != nullptr;
+            if (texture)
+            {
+                batch.texture = texture->texture;
+                batch.tex0 = texture->key;
+                batch.setsTex0 = true;
+            }
             batch.blended = (material.prim & 0x40u) != 0;
             batch.setsAlpha = batch.setsTest = true;
             batch.alpha = material.alpha;
@@ -522,6 +643,8 @@ namespace jc2
                     {
                         std::memcpy(&v.u, uvSection->data + sv.position * 8u, 4);
                         std::memcpy(&v.v, uvSection->data + sv.position * 8u + 4, 4);
+                        if (texture)
+                            v.u = v.u * texture->su + texture->ou, v.v = v.v * texture->sv + texture->ov;
                     }
                     strip.push_back(v);
                     float s4[4];
@@ -578,6 +701,87 @@ namespace jc2
             rt->functions.generated(kSkinnedCall)(ram, ctx, rt);
         }
 
+        // ---- Shadows: 0x177CF0(actor), a blob on the floor under a character ----
+        // The game fills one record (actor +0x280) and draws it with its primitive drawer (0x146990, VU1 program C,
+        // flags 8: a flat quad). Here the quad is made from the same actor fields: centre p = actor +0x190 + actor
+        // +0x410 (y - 0.01), size s = +0x1B0, half sizes 0.45 / 0.35 (0.65 / 0.45 unless the mode word 0x8788D2 is
+        // 10), turned by +0x1A4 around y; corners (+,+) (+,-) (-,+) (-,-) with UV (0,0) (0,1) (1,0) (1,1). Not drawn
+        // when p is outside the camera's cull volume (+0x270). Texture: picture 0 of the TIM2 the game keeps at
+        // G +0x470 (resource 0xB69, black with a radial alpha; G = *(**0x520C2C + 0x24)). GS state: ALPHA (0 - Cd) As + Cd
+        // (the texture's colour is black: the plain alpha blend is the same), depth test GEQUAL, no depth write.
+        constexpr uint32_t kShadow = 0x00177CF0u;
+        constexpr uint32_t kShadowMode = 0x008788D2u;
+        constexpr uint32_t kShadowGlobals = 0x00520C2Cu;
+        uint64_t g_shadows = 0, g_shadowCalls = 0, g_shadowNoBit = 0, g_shadowCulled = 0, g_shadowNoTexture = 0;
+
+        void shadow(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+        {
+            const uint32_t actor = ctx->r[4].uw[0];
+            const uint32_t camera = r32(ram, 0x006CC5F4u);
+            ++g_shadowCalls;
+            if (!(r32(ram, actor + 4) & 0x400000u))
+                ++g_shadowNoBit;
+            if (!meshesOff && camera && (r32(ram, actor + 4) & 0x400000u))
+            {
+                const uint32_t g = r32(ram, r32(ram, r32(ram, kShadowGlobals)) + 0x24u);
+                const uint32_t tim2 = r32(ram, g + 0x470);
+                const std::vector<uint32_t> pictures = tim2Pictures(ram, tim2);
+                float p[4] = {rf(ram, actor + 0x190) + rf(ram, actor + 0x410), rf(ram, actor + 0x194) + rf(ram, actor + 0x414),
+                              rf(ram, actor + 0x198) + rf(ram, actor + 0x418), 1.0f};
+                p[1] -= 0.01f;
+                const Mat cull = readMat(ram, camera + 0x270);
+                float c[4];
+                apply(cull, p, c);
+                const bool inside = std::fabs(c[0]) <= std::fabs(c[3]) && std::fabs(c[1]) <= std::fabs(c[3]) &&
+                                    std::fabs(c[2]) <= std::fabs(c[3]);
+                g_shadowCulled += inside ? 0u : 1u;
+                g_shadowNoTexture += pictures.empty() ? 1u : 0u;
+                if (inside && !pictures.empty())
+                {
+                    const uint64_t key = 0x3E00000000000000ull | tim2;
+                    auto texture = decodeTim2Picture(at(ram, pictures[0]), 0, key);
+                    const float s = rf(ram, actor + 0x1B0), angle = rf(ram, actor + 0x1A4);
+                    const bool mode10 = static_cast<int16_t>(r32(ram, kShadowMode & ~3u) >> 16) == 10;
+                    const float hx = (mode10 ? 0.45f : 0.65f) * s, hz = (mode10 ? 0.35f : 0.45f) * s;
+                    const float co = std::cos(angle), si = std::sin(angle);
+                    auto corner = [&](float ox, float oz, float u, float v) {
+                        bozo::render::Vertex out;
+                        out.x = p[0] + co * ox + si * oz;
+                        out.y = p[1];
+                        out.z = p[2] - si * ox + co * oz;
+                        out.u = u, out.v = v;
+                        out.rgba = 0x80808080u;
+                        return out;
+                    };
+                    const auto v0 = corner(hx, hz, 0, 0), v1 = corner(hx, -hz, 0, 1), v2 = corner(-hx, hz, 1, 0),
+                               v3 = corner(-hx, -hz, 1, 1);
+                    const Mat view = readMat(ram, camera + 0x130), projection = readMat(ram, camera + 0x170);
+                    const Mat pv = mul(projection, view);
+                    bozo::render::MeshDraw draw;
+                    const Mat screenM = mul(fieldToFrame(), pv), clipM = mul(readMat(ram, camera + 0x2F0), pv);
+                    std::memcpy(draw.matrix, screenM.m, sizeof draw.matrix);
+                    std::memcpy(draw.clip, clipM.m, sizeof draw.clip);
+                    draw.hasClip = true;
+                    draw.object = actor;
+                    bozo::render::MeshBatch batch;
+                    batch.textured = texture != nullptr;
+                    batch.texture = texture;
+                    batch.tex0 = key;
+                    batch.setsTex0 = true;
+                    batch.blended = true;
+                    batch.setsAlpha = batch.setsTest = batch.setsZbuf = true;
+                    batch.alpha = 0x4000000046ull;
+                    batch.test = 0x51001ull;
+                    batch.depthMasked = true;
+                    batch.vertices = {v0, v1, v2, v1, v2, v3};
+                    draw.batches.push_back(std::move(batch));
+                    g_blended.push_back(std::move(draw));
+                    ++g_shadows;
+                }
+            }
+            rt->functions.generated(kShadow)(ram, ctx, rt);
+        }
+
         bozo::render::MeshSubmitter g_submitter;
     } // namespace
 
@@ -589,8 +793,11 @@ namespace jc2
         for (const auto &d : g_blended)
             g_submitter.submit(d);
         if (++g_frames % 600 == 0 && (g_drawn || g_missing))
-            std::printf("[jc2:meshes] frames %llu: %llu parts drawn, %llu not found\n", (unsigned long long)g_frames,
-                        (unsigned long long)g_drawn, (unsigned long long)g_missing);
+            std::printf("[jc2:meshes] frames %llu: %llu parts drawn, %llu not found, %llu shadows (%llu calls, %llu without the bit, %llu culled, "
+                        "%llu without a texture)\n",
+                        (unsigned long long)g_frames, (unsigned long long)g_drawn, (unsigned long long)g_missing,
+                        (unsigned long long)g_shadows, (unsigned long long)g_shadowCalls, (unsigned long long)g_shadowNoBit,
+                        (unsigned long long)g_shadowCulled, (unsigned long long)g_shadowNoTexture);
         g_opaque.clear();
         g_blended.clear();
     }
@@ -610,5 +817,6 @@ namespace jc2
         r.registerFunction(kSkinnedBuilder, skinnedBuilder);
         r.registerFunction(kSkinnedMaterial, skinnedMaterial);
         r.registerFunction(kSkinnedCall, skinnedCall);
+        r.registerFunction(kShadow, shadow);
     }
 } // namespace jc2

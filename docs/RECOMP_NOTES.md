@@ -536,3 +536,15 @@ Mapped from a RAM dump of the first scene and the disc (subagent analysis, `buil
   on the disc, 1,378 distinct, 30,322 submeshes, 7.5 M vertices: a 368 MB pack), plus a 'RESOURCES' index (resource id ->
   sub-files). The hooks note the builder's context and the material, the mesh call looks the chain up by (resource,
   offset) and draws it with the programs' maths on the CPU.
+- **Textures** (2026-11-16): a material's (bank, slot, index) gives its record and its slot's TIM2 picture; the UVs
+  are in the record's GS page (TEX0 TW/TH) and remapped to the picture by its place (record +0x10). A slot registered
+  without its TIM2 (a room's) is matched to a loaded resource's TIM2 sub-file with the same pictures. Palettes are
+  24-bit (TIM2 CLUT type 2, CSM1 order); a room's pictures (picture format 0x30) keep their 8-bit pixels in the GS's
+  PSMT8 order (unswizzled when decoded); the characters' are linear.
+- **Shadows**: 0x177CF0(actor) draws one blob quad on the floor (through the generic primitive drawer 0x146990 ->
+  0x146B70, VU1 program C, flags 8). Native: centre actor +0x190 + +0x410 (y - 0.01), size +0x1B0, half sizes
+  0.45/0.35 (mode word 0x8788D2 == 10, else 0.65/0.45), turned by +0x1A4, culled by camera +0x270; texture picture 0
+  of the TIM2 at G +0x470 (G = *(**0x520C2C + 0x24): resource 0xB69, a 32-bit picture, black with a radial alpha);
+  ALPHA (0 - Cd) As + Cd, depth test without write. Analysis: `build/bozo/analysis5` (program C emulated, the
+  EE-side rebuild matches it exactly). 0x146990's other callers (effects) and the screen passes (0x22CF10 fade, a
+  depth mask and a blur in program C screen-space mode) are not ported.

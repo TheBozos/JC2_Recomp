@@ -76,10 +76,48 @@ namespace jc2
             const uint16_t header = get16(h + 12), colours = get16(h + 14);
             const uint8_t clutType = h[18], imageType = h[19];
             const uint16_t width = get16(h + 20), height = get16(h + 22);
-            if (!width || !height || width > 2048 || height > 2048 || (imageType != 4 && imageType != 5))
+            if (!width || !height || width > 2048 || height > 2048 || imageType < 1 || imageType > 5)
                 return nullptr;
             const uint8_t *pixels = h + header, *clut = pixels + imageBytes;
-            const size_t clutBytes = (clutType & 0x1F) == 1 ? colours * 2u : colours * 4u;
+            // Direct colour (no CLUT): type 1 16-bit (A1B5G5R5), 2 24-bit, 3 32-bit (alpha 0x80 = 1.0).
+            if (imageType <= 3)
+            {
+                const uint64_t check = fnv(pixels, imageBytes);
+                Picture &cached = pictures[{key, 0u}];
+                if (cached.texture && cached.check == check)
+                    return cached.texture;
+                auto texture = std::make_shared<bozo::render::Texture>();
+                texture->width = width;
+                texture->height = height;
+                texture->rgba.resize(size_t(width) * height);
+                const uint32_t bytes = imageType == 1 ? 2u : imageType == 2 ? 3u : 4u;
+                if (size_t(width) * height * bytes > imageBytes)
+                    return nullptr;
+                for (size_t i = 0; i < texture->rgba.size(); ++i)
+                {
+                    const uint8_t *p = pixels + i * bytes;
+                    uint32_t c;
+                    if (imageType == 1)
+                    {
+                        const uint16_t v = get16(p);
+                        c = (v & 31) * 255 / 31 | ((v >> 5 & 31) * 255 / 31) << 8 | ((v >> 10 & 31) * 255 / 31) << 16 |
+                            (v & 0x8000u ? 0xFF000000u : 0u);
+                    }
+                    else if (imageType == 2)
+                        c = p[0] | p[1] << 8 | p[2] << 16 | 0xFF000000u;
+                    else
+                        c = p[0] | p[1] << 8 | p[2] << 16 | std::min(255u, uint32_t(p[3]) * 2u) << 24;
+                    texture->rgba[i] = c;
+                }
+                texture->key = 0x4A43320000000000ull ^ key;
+                texture->version = ++pictureVersion;
+                cached.texture = texture;
+                cached.check = check;
+                return texture;
+            }
+            // Picture format 0x30 (a room's pictures): 8-bit pixels in the GS's own order, 16 x 16 blocks.
+            const bool swizzled = (h[16] & 0x30u) == 0x30u && width % 16 == 0 && height % 16 == 0;
+            const size_t clutBytes = (clutType & 0x1F) == 1 ? colours * 2u : (clutType & 0x1F) == 2 ? colours * 3u : colours * 4u;
             const uint64_t check = fnv(pixels, imageBytes, fnv(clut, clutBytes));
             Picture &cached = pictures[{key, paletteIndex}];
             if (cached.texture && cached.check == check)
@@ -95,6 +133,12 @@ namespace jc2
                     const uint16_t c = get16(clut + 2 * (start + i));
                     const uint32_t r = (c & 31) * 255 / 31, g = (c >> 5 & 31) * 255 / 31, b = (c >> 10 & 31) * 255 / 31;
                     palette[i] = r | g << 8 | b << 16 | (c & 0x8000u ? 0xFF000000u : 0u);
+                }
+                else if ((clutType & 0x1F) == 2)
+                {
+                    // CT24: three bytes a colour, opaque (TEXA's TA0, 0x80).
+                    const uint8_t *c = clut + 3 * (start + i);
+                    palette[i] = c[0] | c[1] << 8 | c[2] << 16 | 0xFF000000u;
                 }
                 else
                 {
@@ -117,7 +161,20 @@ namespace jc2
                 for (uint32_t x = 0; x < width; ++x)
                 {
                     const size_t i = size_t(y) * width + x;
-                    const uint32_t index = imageType == 5 ? pixels[i] : (pixels[i / 2] >> (4 * (x & 1))) & 15u;
+                    uint32_t index;
+                    if (imageType == 5 && swizzled)
+                    {
+                        // The GS's PSMT8 layout (blocks of 16 x 16, columns of 16 x 4 in four 32-bit lanes), as the
+                        // pictures with format 0x30 keep their pixels (uploaded as PSMCT32 words).
+                        const size_t block = size_t(y & ~0xFu) * width + size_t(x & ~0xFu) * 2;
+                        const uint32_t swap = (((y + 2) >> 2) & 1u) * 4u;
+                        const uint32_t row = ((((y & ~3u) >> 1) + (y & 1u)) & 7u);
+                        const size_t column = size_t(row) * width * 2 + ((x + swap) & 7u) * 4u;
+                        const uint32_t byte = ((y >> 1) & 1u) + ((x >> 2) & 2u);
+                        index = pixels[block + column + byte];
+                    }
+                    else
+                        index = imageType == 5 ? pixels[i] : (pixels[i / 2] >> (4 * (x & 1))) & 15u;
                     texture->rgba[i] = index < palette.size() ? palette[index] : 0u;
                 }
             texture->key = 0x4A43320000000000ull ^ key ^ uint64_t(paletteIndex & 0xFFu) << 40;
@@ -481,6 +538,12 @@ namespace jc2
         }
         quads.clear();
         serial = 0;
+    }
+
+    // A TIM2 picture (its header in EE memory) decoded, for the 3D models' textures (runtime/jc2_meshes.cpp).
+    std::shared_ptr<const bozo::render::Texture> decodeTim2Picture(const uint8_t *header, uint32_t palette, uint64_t key)
+    {
+        return decodePicture(header, palette, key);
     }
 
     void install2D(bozo::port::Registry &r)
