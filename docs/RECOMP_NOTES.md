@@ -446,3 +446,16 @@ Result: the intro story (`ADV0.PSS`) plays in the window at 60 frames/s with its
 Still to check: the title part and START, the other movies (`ADV1`, `ADV2`, the beast movies), the skip.
 BozoEngine note: its `sceMpegCreate` writes TMB addresses (0x1717BC, 0x171800: JC2 code bytes, harmless here); to
 be made port-neutral upstream.
+
+## After the intro: what is drawn (2026-11-16)
+
+- `--pad-script` (`frame:BUTTON/frames`): `700:START/4` skips the intro (allowed after 11 pictures, ids < 3).
+- **Draw census** (`JC2_DRAW_CENSUS=1`, `runtime/jc2_draw.cpp`): the game's builders write seven per-frame packet
+  buffers (table 0x6CC5F0: entry +0x84 base, +0x88 size, +0x8C fill). Pointer 0x13DD50(buffer) (0x13DC90: buffer 0),
+  base 0x13DD90(buffer), commit 0x13DE10(buffer, qwc); buffers 0-5 go out as one VIF1 chain (0x13E0D4), buffer 6 as
+  GIF (0x13E1C0); 0x13E2E0 links the frame's chain. The census counts callers of each per 300 frames.
+- After the skip (frames 1500-1800): the only content is **0x161D50(object)**, 3 a frame: JC2's model renderer. It
+  loops over the object's parts (matrices from +0x08/+0x0C), sends each to VU1 through 0x1622A0 into buffer 1, then
+  0x13DE70 adds its GIF part to buffer 6 (4 a frame in all). The screen polls the pads and the memory card (no game
+  printf). So the menus already need the 3D path: the model format, the VU1 programs (0x4D8800-0x4E3768) redone on the
+  CPU, meshes and textures converted offline from the disc, drawn with `Renderer::draw`.

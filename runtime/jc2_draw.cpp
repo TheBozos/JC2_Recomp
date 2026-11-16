@@ -12,6 +12,10 @@
 #include "bozo/port.h"
 #include "bozo/render/renderer.h"
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <map>
+#include <utility>
 #include <cstring>
 #include <memory>
 
@@ -122,6 +126,53 @@ namespace jc2
             ctx->r[2].ud[0] = 1;
             ctx->pc = ctx->r[31].uw[0];
         }
+        // ---- Bring-up: the draw census (JC2_DRAW_CENSUS=1) ----
+        // The game's packet builders take their write pointer in one of seven per-frame packet buffers (table 0x6CC5F0)
+        // with 0x13DD50(buffer) (0x13DC90 for buffer 0). Every 300 frames the census lists which callers did, per buffer:
+        // the builders of what is on screen, to port one family at a time.
+        constexpr uint32_t kBufferPointer = 0x0013DD50u;
+        constexpr uint32_t kBufferPointer0 = 0x0013DC90u;
+        const bool census = std::getenv("JC2_DRAW_CENSUS") != nullptr;
+        std::map<std::pair<uint32_t, uint32_t>, uint64_t> censusCounts; // (buffer, caller) -> calls
+        uint64_t censusFrames = 0;
+
+        void countCaller(uint32_t buffer, uint32_t ra)
+        {
+            if (census)
+                ++censusCounts[{buffer, ra}];
+        }
+        void bufferPointer(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+        {
+            countCaller(ctx->r[4].uw[0], ctx->r[31].uw[0]);
+            rt->functions.generated(kBufferPointer)(ram, ctx, rt);
+        }
+        void bufferPointer0(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+        {
+            countCaller(0, ctx->r[31].uw[0]);
+            rt->functions.generated(kBufferPointer0)(ram, ctx, rt);
+        }
+        constexpr uint32_t kBufferBase = 0x0013DD90u;   // buffer a0's pointer (another form)
+        constexpr uint32_t kBufferCommit = 0x0013DE10u; // buffer a0 advanced by a1 quadwords
+        void bufferBase(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+        {
+            countCaller(0x100u | ctx->r[4].uw[0], ctx->r[31].uw[0]);
+            rt->functions.generated(kBufferBase)(ram, ctx, rt);
+        }
+        void bufferCommit(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+        {
+            countCaller(0x200u | ctx->r[4].uw[0], ctx->r[31].uw[0]);
+            rt->functions.generated(kBufferCommit)(ram, ctx, rt);
+        }
+        void censusFrameEnd()
+        {
+            if (!census || ++censusFrames % 300 != 0)
+                return;
+            std::printf("[jc2:census] frames %llu-%llu: buffer caller calls\n", (unsigned long long)(censusFrames - 299),
+                        (unsigned long long)censusFrames);
+            for (const auto &[key, calls] : censusCounts)
+                std::printf("[jc2:census]   %u 0x%06x %llu\n", key.first, key.second, (unsigned long long)calls);
+            censusCounts.clear();
+        }
     } // namespace
 
     // The game's frame ended (the frame wait): what was drawn for it is published, the next frame begins.
@@ -134,6 +185,7 @@ namespace jc2
         else
             renderer.clearBackdrop();
         movieShown = false;
+        censusFrameEnd();
         renderer.publishOverlay();
         renderer.endFrame();
         renderer.beginFrame(s);
@@ -152,5 +204,9 @@ namespace jc2
         r.registerFunction(kViBufStopDma, ipuFeederIdle);
         r.registerFunction(kViBufRestartDma, ipuFeederIdle);
         r.registerFunction(kVideoStream, videoStreamTaken);
+        r.registerFunction(kBufferPointer, bufferPointer);
+        r.registerFunction(kBufferPointer0, bufferPointer0);
+        r.registerFunction(kBufferBase, bufferBase);
+        r.registerFunction(kBufferCommit, bufferCommit);
     }
 } // namespace jc2
