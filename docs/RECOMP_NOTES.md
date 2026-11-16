@@ -459,3 +459,17 @@ be made port-neutral upstream.
   0x13DE70 adds its GIF part to buffer 6 (4 a frame in all). The screen polls the pads and the memory card (no game
   printf). So the menus already need the 3D path: the model format, the VU1 programs (0x4D8800-0x4E3768) redone on the
   CPU, meshes and textures converted offline from the disc, drawn with `Renderer::draw`.
+
+## 2D pictures, native (2026-11-16)
+
+The screen after the intro is not 3D: 0x161D50(object) is the game's picture drawer (title, menu frames, cursor,
+logos). Mapped from the disassembly and a RAM dump (`runtime/jc2_2d.cpp` header has the layouts): resource nodes in a
+list at 0x6C47D4, parts of tiles, each tile a TIM2 picture kept in EE RAM (uploaded once to GS memory by 0x161380 on
+the console), GIF strips in buffer 1 linked by layer into buffer 6. Drawn natively: the tile's TIM2 picture decoded
+from EE RAM (8-bit with a CSM1 CT16/CT32 palette, 4-bit CT32; a CLUT may hold several palettes, the object's +0x20
+picks one), quads at the object's x/y (+ the tile's offset, scaled to +0x10/+0x14), modulated by +0x18 (its alpha the
+fade), alpha-blended, far layers first. The tile records' U/V are GS memory positions (pictures packed side by side):
+each tile samples its own picture from its origin. A resource not uploaded yet goes once through the game's drawer
+(its upload fills the records), as a tail call.
+Result: the Genki logo, the title (PRESS START BUTTON) and the main menu's frames and cursor draw in the window. Not
+yet: the menu's labels (another routine), rotation (+0x2C), mip shift (+0x1C).

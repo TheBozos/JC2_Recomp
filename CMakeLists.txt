@@ -81,7 +81,7 @@ add_library(jc2_audio_code OBJECT ${jc2_audio_sources})
 target_link_libraries(jc2_audio_code PRIVATE bozo_runtime_headers)
 target_compile_options(jc2_audio_code PRIVATE -O1 -w)
 
-set(jc2_runtime runtime/jc2_main.cpp runtime/jc2_port.cpp runtime/jc2_audio.cpp runtime/jc2_draw.cpp)
+set(jc2_runtime runtime/jc2_main.cpp runtime/jc2_port.cpp runtime/jc2_audio.cpp runtime/jc2_draw.cpp runtime/jc2_2d.cpp)
 add_executable(jc2-headless ${jc2_runtime} $<TARGET_OBJECTS:jc2_audio_code>)
 target_include_directories(jc2-headless PRIVATE ${jc2_audio_gen})
 target_link_libraries(jc2-headless PRIVATE jc2_game bozo_host)

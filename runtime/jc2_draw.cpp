@@ -21,6 +21,9 @@
 
 namespace jc2
 {
+    void flush2D();
+    void install2D(bozo::port::Registry &);
+
     namespace
     {
         // JC2's display: 640 x 448 (NTSC, a frame of two fields), centred on the GS's 2048 origin.
@@ -186,6 +189,7 @@ namespace jc2
             renderer.clearBackdrop();
         movieShown = false;
         censusFrameEnd();
+        flush2D();
         renderer.publishOverlay();
         renderer.endFrame();
         renderer.beginFrame(s);
@@ -193,6 +197,7 @@ namespace jc2
 
     void installDraw(Runtime &, bozo::port::Registry &r)
     {
+        install2D(r);
         auto &renderer = bozo::render::Renderer::instance();
         renderer.setEnabled(true);
         renderer.setStreamDraws(false);
