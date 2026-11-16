@@ -39,6 +39,7 @@ namespace jc2
     void install(Runtime &, bozo::port::Registry &);
     void installAudio(bozo::libs::Libraries &, bool trace);
     void installDraw(Runtime &, bozo::port::Registry &);
+    void installMeshes(Runtime &, bozo::port::Registry &);
 } // namespace jc2
 
 static int run(int argc, char **argv)
@@ -124,6 +125,7 @@ static int run(int argc, char **argv)
     bozo::port::Registry registry;
     jc2::install(d.runtime(), registry);
     jc2::installDraw(d.runtime(), registry);
+    jc2::installMeshes(d.runtime(), registry);
     // JC2_TRACE_SIF=1: the IOP modules the game asks for and the RPC services it binds.
     const bool traceSif = std::getenv("JC2_TRACE_SIF") != nullptr;
     jc2::installAudio(host.libraries(), traceSif);

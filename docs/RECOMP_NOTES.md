@@ -502,3 +502,37 @@ yet: the menu's labels (another routine), rotation (+0x2C), mip shift (+0x1C).
   The vertex data exist only as prebuilt VIF packets in the model files: per the room's rule they will be converted
   offline from the disc into a mesh pack keyed by the game's own model keys, and drawn from a hook at the builders
   with the game's matrices and lights (program A/B maths on the CPU).
+
+## 3D models (2026-11-16)
+
+Mapped from a RAM dump of the first scene and the disc (subagent analysis, `build/bozo/analysis4`); the parser
+(`tools/jc2_models.py`) rebuilds every triangle of that scene from the disc's bytes alone (13,828 of 13,828, 0.0002 px).
+
+- **Resources**: CDDATA.LOC entries at `*0x6C47BC + 16 id` (+0 sector, +4 bytes). Every read goes through
+  0x15C390(desc): +0 flags, +4 resource id, +8 destination. No id -> address table is kept, so the port records it there.
+  A model resource is an archive (u32 count, then the sub-files' offsets); a character's holds a stub, the model
+  ('0IVX'), a TIM2 bank and its animation; a room's (e.g. 2858) several models and TIM2 banks. Loaded unchanged, except
+  the skinned chains' REF tags (patched with palette + bone x 0x80), material flags (bit 0x4000 each frame) and node +8
+  bit 31.
+- **Model sub-file**: '0IVX' '00.1'/'00.2', 'LDMX', 'SKIN'/'NORM' (byte-reversed). v1 (characters, a few static):
+  counts at +0x20, then groups (32 bytes), nodes (0x50), meshes (0x30 + {material, submesh} pairs), materials (0x60),
+  submeshes. v2 (static): each node followed by its mesh and, per item, a 0x60 material then the submesh.
+- **Material** (0x60): +0 flags (2 prelit, 8 double-sided: the program gets flags ^ 8, 0x20 textured, 0x40 environment
+  map, 0x100 two-pass), +0xC bank, +0xD slot, +0xE index (texture record), +0x10 colour, +0x20 second colour, +0x30
+  PRIM, +0x38 ALPHA_1, +0x40 CLAMP_1, +0x48 TEST_1, +0x50/+0x58 MIPTBP.
+- **Submesh**: {vertices, batches, qwc}, bounding box, then the chain at +0x30 (the DMA CALL target). A batch: (skinned)
+  2 REF tags a bone slot, a CNT tag (its address word: the 4 slots' palette indices), V4-32 header and GIF tags (the
+  last one's w: the starting winding), then per vertex position V3-32, s/t V2-32, normal V4-16 (1.15), weights /
+  colour V4-8; MSCNT. One triangle strip a batch.
+- **Builders**: static 0x148EA0 -> 0x149350(context) per node -> per item 0x149CE0(packet, material) and
+  0x14AA30(packet, submesh); skinned 0x14ADD0 -> 0x14B230(instance, context) -> 0x14BC00(instance, packet, material
+  copy) and 0x14C450(instance, packet, submesh record +0x30 chain). Context: +0 camera, +4 light set, +0x10 the node's
+  world matrix. Camera: +0x130 V, +0x170 P, +0x2F0 clip, +0x380 (winding -1, 1, fog 1000, 0.51). Light set: +0xB0
+  colours + ambient, +0xF0 directions. Bone palettes: actor (0x1C5ECE0 + 0x600 k, +0 the instance) +0x1E0 set A,
+  +0x1E4 set B (by `*0x6CC670 & 1`), 0x80 bytes a bone in world space (+0x30.w: 1/scale for the normals).
+- **Textures**: bank table 0x6CC5F0, 52 bytes a bank (+0x18 slot mask, +0x1C + 12 slot {TIM2, count, records}); a
+  record is 0x60 bytes (+0x20 TEX0). 0x13DAE0(bank, slot, count, records, tim2) registers a slot.
+- **The port** (`tools/jc2_mesh_pack.py`, `runtime/jc2_meshes.cpp`): one pack file per distinct model sub-file (1,888
+  on the disc, 1,378 distinct, 30,322 submeshes, 7.5 M vertices: a 368 MB pack), plus a 'RESOURCES' index (resource id ->
+  sub-files). The hooks note the builder's context and the material, the mesh call looks the chain up by (resource,
+  offset) and draws it with the programs' maths on the CPU.

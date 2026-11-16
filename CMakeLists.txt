@@ -103,12 +103,21 @@ add_library(jc2_audio_code OBJECT ${jc2_audio_sources})
 target_link_libraries(jc2_audio_code PRIVATE bozo_runtime_headers)
 target_compile_options(jc2_audio_code PRIVATE -O1 -w)
 
-set(jc2_runtime runtime/jc2_main.cpp runtime/jc2_port.cpp runtime/jc2_audio.cpp runtime/jc2_draw.cpp runtime/jc2_2d.cpp)
+# The 3D models, converted offline from the player's disc into BozoEngine's mesh pack (game-derived: stays in build/).
+set(jc2_mesh_pack ${CMAKE_BINARY_DIR}/jc2_meshes.pack)
+add_custom_command(OUTPUT ${jc2_mesh_pack}
+  COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/jc2_mesh_pack.py ${JC2_GAME_DIR} ${jc2_mesh_pack}
+  DEPENDS tools/jc2_mesh_pack.py tools/jc2_models.py ${BOZO_ENGINE_DIR}/tools/native_pack/mesh.py
+          ${JC2_GAME_DIR}/CDDATA.000 ${JC2_GAME_DIR}/CDDATA.LOC
+  COMMENT "Converting JC2's 3D models into the mesh pack")
+add_custom_target(jc2_meshes_pack ALL DEPENDS ${jc2_mesh_pack})
+
+set(jc2_runtime runtime/jc2_main.cpp runtime/jc2_port.cpp runtime/jc2_audio.cpp runtime/jc2_draw.cpp runtime/jc2_2d.cpp runtime/jc2_meshes.cpp)
 add_executable(jc2-headless ${jc2_runtime} $<TARGET_OBJECTS:jc2_audio_code>)
 target_include_directories(jc2-headless PRIVATE ${jc2_audio_gen})
 target_link_libraries(jc2-headless PRIVATE jc2_game jc2_overlays bozo_host)
 target_compile_definitions(jc2-headless PRIVATE
-  JC2_DEFAULT_ELF="${JC2_GAME_DIR}/SLUS_203.09" JC2_GAME_DIR="${JC2_GAME_DIR}" JC2_DEFAULT_ISO="${JC2_ISO}" JC2_SYMBOL_MAP="${jc2_symbols}")
+  JC2_DEFAULT_ELF="${JC2_GAME_DIR}/SLUS_203.09" JC2_GAME_DIR="${JC2_GAME_DIR}" JC2_DEFAULT_ISO="${JC2_ISO}" JC2_SYMBOL_MAP="${jc2_symbols}" JC2_MESH_PACK="${jc2_mesh_pack}")
 if(MINGW)
   target_link_options(jc2-headless PRIVATE -static -Wl,--stack,268435456)
 endif()
@@ -120,7 +129,7 @@ if(JC2_WINDOW)
   target_include_directories(jc2 PRIVATE ${jc2_audio_gen})
   target_link_libraries(jc2 PRIVATE jc2_game jc2_overlays bozo_host bozo_app)
   target_compile_definitions(jc2 PRIVATE JC2_WITH_WINDOW
-    JC2_DEFAULT_ELF="${JC2_GAME_DIR}/SLUS_203.09" JC2_GAME_DIR="${JC2_GAME_DIR}" JC2_DEFAULT_ISO="${JC2_ISO}" JC2_SYMBOL_MAP="${jc2_symbols}")
+    JC2_DEFAULT_ELF="${JC2_GAME_DIR}/SLUS_203.09" JC2_GAME_DIR="${JC2_GAME_DIR}" JC2_DEFAULT_ISO="${JC2_ISO}" JC2_SYMBOL_MAP="${jc2_symbols}" JC2_MESH_PACK="${jc2_mesh_pack}")
   if(MINGW)
     target_link_options(jc2 PRIVATE -static -Wl,--stack,268435456)
   endif()

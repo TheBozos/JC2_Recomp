@@ -22,6 +22,7 @@
 namespace jc2
 {
     void flush2D();
+    void meshesFrameEnd();
     void install2D(bozo::port::Registry &);
 
     namespace
@@ -200,6 +201,7 @@ namespace jc2
             renderer.clearBackdrop();
         movieShown = false;
         censusFrameEnd();
+        meshesFrameEnd();
         flush2D();
         renderer.publishOverlay();
         renderer.endFrame();
