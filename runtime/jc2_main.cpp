@@ -1,5 +1,6 @@
 // Jade Cocoon 2 (SLUS-20309) on BozoEngine: the game's recompiled code over native services. jc2 opens the window
 // (SDL3, OpenGL 3.3: BozoEngine's platform layer); jc2-headless runs without one (checks, scripted runs).
+#include "bozo/audio/wav.h"
 #include "bozo/ee/dispatcher.h"
 #include "bozo/host/free_host.h"
 #include "bozo/libs/libraries.h"
@@ -47,6 +48,7 @@ static int run(int argc, char **argv)
 #endif
     options.frames = window ? 0 : 600;
     options.printGameOutput = true;
+    std::string wav;     // the mixer's output recorded (16-bit stereo, 48 kHz)
     std::string dumpRam; // EE RAM at the end of the run (a fault, the frame limit): the boundary to analyse offline
     for (int i = 1; i < argc; ++i)
     {
@@ -63,6 +65,8 @@ static int run(int argc, char **argv)
             options.iso = argv[++i];
         else if (a == "--out" && i + 1 < argc)
             options.out = argv[++i];
+        else if (a == "--wav" && i + 1 < argc)
+            wav = argv[++i];
         else if (a == "--dump-ram" && i + 1 < argc)
             dumpRam = argv[++i];
         else if (a == "--profile-io")
@@ -109,6 +113,12 @@ static int run(int argc, char **argv)
         std::fprintf(stderr, "%s\n", error.c_str());
         return 2;
     }
+    bozo::audio::WavWriter recording;
+    if (!wav.empty() && !recording.open(wav))
+    {
+        std::fprintf(stderr, "cannot open WAV %s\n", wav.c_str());
+        return 2;
+    }
 #ifdef JC2_WITH_WINDOW
     bozo::app::FramePacer pacer;
     pacer.setPaced(window);
@@ -116,12 +126,16 @@ static int run(int argc, char **argv)
     bozo::app::AudioDevice audio;
     if (window && options.padScript.empty())
         host.libraries().pad.input = &devices;
+#endif
     host.onAudio = [&](uint64_t, const int16_t *pcm, size_t count)
     {
+        if (recording.isOpen())
+            recording.write(pcm, count);
+#ifdef JC2_WITH_WINDOW
         if (window)
             audio.push(pcm, count);
-    };
 #endif
+    };
     host.onFrame = [&](uint64_t f, const R5900Context *ctx)
     {
 #ifdef JC2_WITH_WINDOW
@@ -184,10 +198,14 @@ static int run(int argc, char **argv)
         game.run = play;
         game.stop = [&] { host.requestStop(); };
         game.framesEnded = [&] { return host.framesEnded(); };
-        return bozo::app::runWindow(windowOptions, game, &devices);
+        const int result = bozo::app::runWindow(windowOptions, game, &devices);
+        recording.close();
+        return result;
     }
 #endif
-    return play();
+    const int result = play();
+    recording.close();
+    return result;
 }
 
 int main(int argc, char **argv)

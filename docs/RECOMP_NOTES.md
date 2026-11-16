@@ -418,3 +418,31 @@ sound, then draws one family at a time; dump EE RAM at the failing boundary (`--
   the flip's display packet 0x15A04C/0x15A234/0x15A9A8, the movie picture 0x20F0C8-0x20F110 and 0x1556F8. GS:
   `EXTWRITE` 0x15A270, CSR 0x15B4B0 (now native). Not graphics (kept): T0 0x13DF00/0x13E24C/0x13E5C0, the IPU-to
   channel 0x153B38/0x153D04.
+
+## Movies, native (2026-11-16)
+
+JC2 plays its PSS with Sony's **ezmovie sample** wrapped by a game state machine (mapped from the disassembly):
+- player object (create 0x152BE0): flags +0 (0x100 thread started, 0x200 first picture, 0x400 abort, 0x800 done),
+  sceMpeg at +8, stream ring +0x50, ViBuf +0x54, picture queue +0x58, audio decoder +0x5C;
+- the game's movie wrapper (create 0x20DDA0, current movie at gp-0x7390): state +0x1C, GIF in flight +0x48, presenting
+  +0x4C; start 0x20E5C0(movie, id into the 28-entry `\MOV\*.PSS` table at 0x5CD780), per-frame update 0x20E870, skip
+  (START after 11 pictures, ids < 3) 0x492A00 -> 0x20EB90 -> abort flag;
+- CD: a 3 x 0x18000 ring filled by the loader thread (sceCdRead); the feeder 0x1531A0 calls `sceMpegDemuxPssRing`;
+- picture thread 0x1533C0 (priority caller + 1): GetPicture into one of 3 640 x 448 RGB32 slots, pushed to the queue;
+- display 0x20F030: on field-1 frames the oldest picture goes to the GS by a GIF chain; the GIF end handler 0x20F450
+  pops the queue and clears +0x48; 0x20F140 draws the uploaded picture as a sprite while flag 0x200 is set;
+- sound: the PCM stream callback 0x153880 fills the game's audio decoder (96 KB EE ring, 48 KB IOP buffer), pumped
+  by 0x155E20 with `sceSifSetDma` and LIBSD block transfers through the game's sound-driver RPC.
+
+Native owner (`runtime/jc2_draw.cpp`): BozoEngine's libmpeg decodes (FFmpeg) from its own demux, so the IPU feeder
+is idle: `viBufAddDMA` 0x154020 (the nodata callback that spun), StopDMA 0x154330, RestartDMA 0x1544F0 return, and the
+video stream callback 0x1536C0 reports its packet taken. The display side 0x20F030 is native: on field-1 frames the
+oldest slot (RGBA32 in 16 x 16 macroblocks, column-major) becomes the renderer's backdrop and the slot is released at
+once, as the GIF end would; 0x20F140 keeps it on screen while flag 0x200 is set. No GIF packet is built or read. The
+sound is the game's own path over the compiled M2SOUND/LIBSD: the intro's soundtrack plays (music: ~1,300-2,900 zero
+crossings a second, 0.02 % of samples at full scale).
+
+Result: the intro story (`ADV0.PSS`) plays in the window at 60 frames/s with its music; `--wav FILE` records the mixer.
+Still to check: the title part and START, the other movies (`ADV1`, `ADV2`, the beast movies), the skip.
+BozoEngine note: its `sceMpegCreate` writes TMB addresses (0x1717BC, 0x171800: JC2 code bytes, harmless here); to
+be made port-neutral upstream.
