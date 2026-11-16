@@ -109,7 +109,7 @@ namespace jc2
         {
             static int depth = 0;
             static unsigned calls = 0;
-            if (std::getenv("JC2_TRACE_SIF") && calls++ < 64)
+            if (std::getenv("JC2_TRACE_SIF") && (calls++ < 64 || (calls > 200000 && calls < 200040)))
                 std::printf("[jc2:sif] EE 0x%x command 0x%x, %zu bytes in, %zu out (depth %d)\n", service, command,
                             in.size(), out.size(), depth);
             if (depth > 4)
@@ -124,6 +124,8 @@ namespace jc2
             handler.r[29].ud[0] = stack + 0x800u;
             handler.r[31].ud[0] = 0u;
             handler.cycleLimit = ~0ull; // no stop: it runs to its end
+            // Its clock starts at the EE's now (the dispatcher reads guest time from the running context's cycles).
+            handler.cycles = bozo::port::now(rt);
             rt->functions.generated(function)(ram, &handler, rt);
             const uint32_t reply = handler.r[2].uw[0];
             if (!out.empty())

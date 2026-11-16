@@ -63,6 +63,28 @@ target_link_libraries(jc2_game PUBLIC bozo_runtime_headers)
 target_include_directories(jc2_game PUBLIC ${jc2_gen})
 target_compile_options(jc2_game PRIVATE -O1 -w -ffp-contract=off)
 
+# The code overlays (1,383 CodeWarrior modules loaded from CDDATA.000 at run time), each compiled as an image of its own,
+# in 32 batches; jc2_overlays.cpp registers them by their 64-byte header (tools/jc2_bozo_overlays.py).
+set(jc2_overlay_gen ${CMAKE_BINARY_DIR}/jc2_overlays)
+set(jc2_overlay_sources ${jc2_overlay_gen}/jc2_overlays.cpp)
+foreach(i RANGE 31)
+  if(i LESS 10)
+    list(APPEND jc2_overlay_sources ${jc2_overlay_gen}/jc2_overlays_0${i}.cpp)
+  else()
+    list(APPEND jc2_overlay_sources ${jc2_overlay_gen}/jc2_overlays_${i}.cpp)
+  endif()
+endforeach()
+add_custom_command(OUTPUT ${jc2_overlay_sources}
+  COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/jc2_bozo_overlays.py ${CMAKE_SOURCE_DIR} ${jc2_overlay_gen}
+          ${JC2_GAME_DIR} $<TARGET_FILE:bozo-recomp> ${jc2_gen}/jc2_externals.txt 32
+  DEPENDS bozo-recomp tools/jc2_bozo_overlays.py tools/find_overlays.py tools/wrap_overlay.py tools/overlay_functions.py
+          ${jc2_gen}/jc2_externals.txt ${JC2_GAME_DIR}/CDDATA.000
+  COMMENT "Compiling JC2's code overlays (bozo-recomp, one image per module)")
+add_library(jc2_overlays STATIC ${jc2_overlay_sources})
+target_link_libraries(jc2_overlays PUBLIC bozo_runtime_headers)
+target_include_directories(jc2_overlays PRIVATE ${jc2_overlay_gen}/gen)
+target_compile_options(jc2_overlays PRIVATE -O1 -w -ffp-contract=off)
+
 # The sound driver's IOP modules compiled offline to native C++ (strict: every import a native host service).
 set(jc2_audio_gen ${CMAKE_BINARY_DIR}/jc2_audio_gen)
 set(jc2_audio_sources)
@@ -84,7 +106,7 @@ target_compile_options(jc2_audio_code PRIVATE -O1 -w)
 set(jc2_runtime runtime/jc2_main.cpp runtime/jc2_port.cpp runtime/jc2_audio.cpp runtime/jc2_draw.cpp runtime/jc2_2d.cpp)
 add_executable(jc2-headless ${jc2_runtime} $<TARGET_OBJECTS:jc2_audio_code>)
 target_include_directories(jc2-headless PRIVATE ${jc2_audio_gen})
-target_link_libraries(jc2-headless PRIVATE jc2_game bozo_host)
+target_link_libraries(jc2-headless PRIVATE jc2_game jc2_overlays bozo_host)
 target_compile_definitions(jc2-headless PRIVATE
   JC2_DEFAULT_ELF="${JC2_GAME_DIR}/SLUS_203.09" JC2_GAME_DIR="${JC2_GAME_DIR}" JC2_DEFAULT_ISO="${JC2_ISO}" JC2_SYMBOL_MAP="${jc2_symbols}")
 if(MINGW)
@@ -96,7 +118,7 @@ endif()
 if(JC2_WINDOW)
   add_executable(jc2 ${jc2_runtime} $<TARGET_OBJECTS:jc2_audio_code>)
   target_include_directories(jc2 PRIVATE ${jc2_audio_gen})
-  target_link_libraries(jc2 PRIVATE jc2_game bozo_host bozo_app)
+  target_link_libraries(jc2 PRIVATE jc2_game jc2_overlays bozo_host bozo_app)
   target_compile_definitions(jc2 PRIVATE JC2_WITH_WINDOW
     JC2_DEFAULT_ELF="${JC2_GAME_DIR}/SLUS_203.09" JC2_GAME_DIR="${JC2_GAME_DIR}" JC2_DEFAULT_ISO="${JC2_ISO}" JC2_SYMBOL_MAP="${jc2_symbols}")
   if(MINGW)

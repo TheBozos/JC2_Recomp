@@ -22,6 +22,18 @@
 #include <filesystem>
 #endif
 
+struct Jc2Overlay
+{
+    uint32_t load, end;
+    uint8_t identity[64];
+    const BozoFunctionEntry *functions;
+    const size_t *count;
+    const BozoResumeEntry *resume;
+    const size_t *resumeCount;
+};
+extern const Jc2Overlay jc2_overlays[];
+extern const size_t jc2_overlay_count;
+
 namespace jc2
 {
     void install(Runtime &, bozo::port::Registry &);
@@ -101,6 +113,14 @@ static int run(int argc, char **argv)
     bozo::host::FreeHost host(options);
     bozo::ee::Dispatcher d(host);
     d.setFunctions(jc2_function_table, jc2_function_count, jc2_resume_table, jc2_resume_count);
+    // The code overlays: a module's code is called only while its header is at its load address.
+    for (size_t k = 0; k < jc2_overlay_count; ++k)
+    {
+        const Jc2Overlay &o = jc2_overlays[k];
+        d.runtime().functions.addModule(o.load, o.end, d.runtime().memory.ram() + o.load,
+                                        std::vector<uint8_t>(o.identity, o.identity + 64), o.functions, *o.count,
+                                        o.resume, *o.resumeCount);
+    }
     bozo::port::Registry registry;
     jc2::install(d.runtime(), registry);
     jc2::installDraw(d.runtime(), registry);

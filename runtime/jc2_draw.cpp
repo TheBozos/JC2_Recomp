@@ -124,6 +124,17 @@ namespace jc2
             ctx->r[2].ud[0] = 0;
             ctx->pc = ctx->r[31].uw[0];
         }
+        // The picture thread's yield (0x153170: RotateThreadReadyQueue(its priority + 1)), which it spins on while it waits
+        // for a free picture slot. On the console each turn costs real time; here a kernel call is nearly free, so the spin
+        // ran hundreds of thousands of times a frame and the game fell to ~33 frames/s. Each yield is charged 2000 EE cycles
+        // (~7 us), then the game's own yield runs (a tail call: a thread switch resumes in the game's code).
+        constexpr uint32_t kPlayerYield = 0x00153170u;
+        void playerYield(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+        {
+            bozo::port::accountCycles(rt, ctx, 2000);
+            rt->functions.generated(kPlayerYield)(ram, ctx, rt);
+        }
+
         void videoStreamTaken(uint8_t *, R5900Context *ctx, Runtime *)
         {
             ctx->r[2].ud[0] = 1;
@@ -209,6 +220,7 @@ namespace jc2
         r.registerFunction(kViBufStopDma, ipuFeederIdle);
         r.registerFunction(kViBufRestartDma, ipuFeederIdle);
         r.registerFunction(kVideoStream, videoStreamTaken);
+        r.registerFunction(kPlayerYield, playerYield);
         r.registerFunction(kBufferPointer, bufferPointer);
         r.registerFunction(kBufferPointer0, bufferPointer0);
         r.registerFunction(kBufferBase, bufferBase);

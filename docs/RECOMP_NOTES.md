@@ -478,3 +478,27 @@ yet: the menu's labels (another routine), rotation (+0x2C), mip shift (+0x1C).
   CDDATA since the game frees them after its GS upload) and box fills 0x167270 (four-corner gradient, style insets at
   0x4E80D0). The main menu (New game / Continue / Battle Arena) draws complete. Font slot 3 (digits) and the boxes'
   animated size are not done yet.
+
+## Overlays, New game, the first scene (2026-11-16)
+
+- **Overlays**: `tools/jc2_bozo_overlays.py` extracts the 1,383 MWo3 modules from CDDATA.000 (`find_overlays.py`), wraps
+  each as an ELF (`wrap_overlay.py`), maps its functions (`overlay_functions.py`) and compiles it with bozo-recomp as an
+  image of its own: all 1,383, 0 untranslated instructions (the 15 `SC_*` that PS2Recomp could not take included). They
+  build in 32 batches (each module in its own namespace) and `jc2_main.cpp` registers them with
+  `FunctionTable::addModule` by their 64-byte header. BozoEngine: `moduleAt` got a span check and a last-module cache.
+- **New game**: the opening movie (not skippable) plays natively; the picture thread's slot wait spins on a yield
+  (0x153170), now charged 2000 EE cycles a turn (it had dropped the game to ~33 frames/s). The EE RPC bridge's handler
+  context now starts at the EE's clock (it started at 0, which the watchdog read as a 600-field stall). M2SOUND's
+  `WaitNonVblank` (vblank 7) returns at once (BozoEngine).
+- **First scene** (frame ~10,500 of a New-game run): the dialogue box and its text draw natively. The 3D is mapped
+  (subagent analysis in `build/bozo/analysis3`, an offline proof that renders the scene from a RAM dump):
+  - static models: builder 0x149350 (draw lists from 0x148EA0), VU1 program B (0x4D8810), per part a 0x60-byte material
+    (flags, texture bank/slot/index, colours, PRIM, ALPHA, CLAMP, TEST) then a prebuilt VIF chain in the model data;
+  - characters: 0x14ADD0/0x14B230, VU1 program A (0x4DC6E0), 4-bone skinned batches (bones from the pose in RAM),
+    textures uploaded per part from TIM2 data in RAM;
+  - shadows (guess) 0x146B70 and a screen tint 0x22CF10, VU1 program C (0x4DD9B0);
+  - projection X = 1126.1 x/z + 2048, Y = 525.5 y/z + 2048 (a 640 x 224 field), lighting: 3 directional lights +
+    ambient + a second set, material colour, fog 0.51 (1000 - w).
+  The vertex data exist only as prebuilt VIF packets in the model files: per the room's rule they will be converted
+  offline from the disc into a mesh pack keyed by the game's own model keys, and drawn from a hook at the builders
+  with the game's matrices and lights (program A/B maths on the CPU).
