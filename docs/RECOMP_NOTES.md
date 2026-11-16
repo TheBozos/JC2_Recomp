@@ -560,5 +560,13 @@ Mapped from a RAM dump of the first scene and the disc (subagent analysis, `buil
   (offsets +-sqrt(3) S, +-S/2 field lines; S = 1.5 strength), each mixing by the mask's alpha. Native: aux image 1 = the
   mask by a depth lookup on the frame's depth (the game's sprite rule per bucket), six frame-sampling draws with their
   alpha from it. JC2_DOF=0 / JC2_FADE=0 turn them off; JC2_TRACE_FX=1 logs their parameters.
+- **Static lighting** (program B, analysis `build/bozo/analysis7`: the frame's whole VIF chain run through the real
+  microcode with `vu1b.py`, which adds the MAC flags): the lights are taken into object space once per object (VU[76..78]
+  = L x W), so a vertex gets d = max(0, L . n W) with the normal not renormalised; colour = min(1, (C0 d0 + C1 d1 +
+  C2 d2 + ambient) x base) x scale, truncated. base = the material colour, or the vertex colour / 127 when the material
+  has bit 1 (the room: its colours are a bake that the lights still multiply); scale = VU[1] (255), times 0.502
+  for textured materials (bit 5 without bit 8); alpha 128. Unlit (program bit 0): base x scale. The same maths in
+  both paths (0x57D per vertex, 0x479 for the room's flag-0x4000 batches). Not ported: flag 0x800's second pass
+  (0x4BC: the batch again with texture coordinates projected from the position by VU[34..37], colour 128).
 - The model batches set the depth write themselves (the mesh submitter keeps the last batch's ZBUF: after the first
   shadow, nothing wrote depth and the shop counter was drawn over).

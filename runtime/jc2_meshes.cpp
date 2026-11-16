@@ -471,6 +471,40 @@ namespace jc2
             return rgba;
         }
 
+        // Program B's colour (VU 0x57D / 0x479, checked against the microcode run on a captured frame):
+        //   d = max(0, L . n)  with n the object normal taken through W as is (not renormalised)
+        //   colour = min(1, (C0 d0 + C1 d1 + C2 d2 + ambient) x base) x scale, truncated
+        // base is the material colour, or the vertex colour / 127 when the material has bit 1; scale is VU[1] (255)
+        // halved to 128.01 for textured materials (bit 5 without bit 8). Unlit (program bit 0): base x scale.
+        uint32_t staticColour(const Lights &l, const MaterialView &m, const float wn[3], const uint8_t *vc, bool unlit)
+        {
+            const bool halve = (m.flags & 0x20u) && !(m.flags & 0x100u);
+            const float scale = halve ? 255.0f * 0.502f : 255.0f;
+            float base[4] = {m.colour[0], m.colour[1], m.colour[2], m.colour[3]};
+            if (vc && (m.flags & 2u))
+                for (int c = 0; c < 3; ++c)
+                    base[c] = vc[c] / 127.0f;
+            float col[4];
+            if (unlit)
+                for (int c = 0; c < 4; ++c)
+                    col[c] = base[c] * (c == 3 ? 128.0f : scale);
+            else
+            {
+                float d[3];
+                for (int k = 0; k < 3; ++k)
+                    d[k] = std::max(0.0f, l.directions.m[k] * wn[0] + l.directions.m[4 + k] * wn[1] + l.directions.m[8 + k] * wn[2]);
+                for (int c = 0; c < 4; ++c)
+                {
+                    const float lit = l.colours.m[c] * d[0] + l.colours.m[4 + c] * d[1] + l.colours.m[8 + c] * d[2] + l.colours.m[12 + c];
+                    col[c] = std::min(1.0f, lit * base[c]) * (c == 3 ? 128.0f : scale);
+                }
+            }
+            uint32_t rgba = 0;
+            for (int c = 0; c < 4; ++c)
+                rgba |= static_cast<uint32_t>(std::clamp(col[c], 0.0f, 255.0f)) << (8 * c);
+            return rgba;
+        }
+
         // The actor whose instance this is (its bone palettes).
         uint32_t actorOf(const uint8_t *ram, uint32_t instance)
         {
@@ -623,24 +657,10 @@ namespace jc2
                     else
                     {
                         v.x = pos[0], v.y = pos[1], v.z = pos[2];
-                        if (hasColour)
-                        {
-                            uint32_t rgba = 0;
-                            for (int c = 0; c < 4; ++c)
-                                rgba |= static_cast<uint32_t>(std::min<uint32_t>(sv.rgba[c], 128u)) << (8 * c);
-                            v.rgba = rgba;
-                        }
-                        else
-                        {
-                            // Program B's lighting is not decoded yet: the normal in world space, lit as program A.
-                            const float n4[4] = {n[0], n[1], n[2], 0.0f};
-                            float wn[4];
-                            apply(world, n4, wn);
-                            const float len = std::sqrt(wn[0] * wn[0] + wn[1] * wn[1] + wn[2] * wn[2]);
-                            if (len > 1e-6f)
-                                wn[0] /= len, wn[1] /= len, wn[2] /= len;
-                            v.rgba = litColour(lights, material, wn, unlit || !hasNrm);
-                        }
+                        const float n4[4] = {n[0], n[1], n[2], 0.0f};
+                        float wn[4];
+                        apply(world, n4, wn);
+                        v.rgba = staticColour(lights, material, wn, hasColour ? sv.rgba : nullptr, unlit || !hasNrm);
                     }
                     if (uvSection && (sv.position + 1u) * 8u <= uvSection->size)
                     {
