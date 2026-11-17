@@ -382,6 +382,82 @@ namespace jc2
             return &view;
         }
 
+        // A record held by a resident bank slot (found by its address).
+        const TextureView *residentRecord(const uint8_t *ram, uint32_t record)
+        {
+            for (uint32_t bank = 0; bank < 4; ++bank)
+            {
+                const uint32_t entry = kTextureBanks + bank * 52u, mask = r32(ram, entry + 0x18);
+                for (uint32_t slot = 0; slot < 4; ++slot)
+                {
+                    if (!(mask & (1u << slot)))
+                        continue;
+                    const uint32_t at = entry + 0x1C + slot * 12u, count = r32(ram, at + 4), records = r32(ram, at + 8);
+                    if (record < records || record >= records + count * 0x60u || (record - records) % 0x60u)
+                        continue;
+                    uint8_t material[0x10] = {};
+                    material[0xC] = static_cast<uint8_t>(bank), material[0xD] = static_cast<uint8_t>(slot);
+                    const uint32_t index = (record - records) / 0x60u;
+                    material[0xE] = static_cast<uint8_t>(index), material[0xF] = static_cast<uint8_t>(index >> 8);
+                    return materialTexture(ram, material);
+                }
+            }
+            return nullptr;
+        }
+
+        // ---- The room's projected texture (VU1 program B flag 0x800, second pass at 0x4BC / 0x508) ----
+        // 0x195EA0(room) draws a room's nodes; it keeps the pass's texture record at room +0x46C (set up as context 2 by
+        // 0x14A800: TEX0 from the record with TFX modulate, CLAMP 5, ALPHA 0x46 = (0 - Cd) As + Cd, TEST: depth GEQUAL,
+        // no depth or alpha write). The builder sets the program's flag 0x800 when the material has it, camera +0x440 is
+        // 0 and the node's box is inside the projector (context +0x50: camera +0x3F0 x W). Per vertex the program draws
+        // the batch again with colour 128 and s, t = P (position + W's translation), P = VU[34..37] = camera +0x3B0.
+        constexpr uint32_t kRoomDraw = 0x00195EA0u;
+        uint32_t g_projectedRecord = 0, g_projectedTim2 = 0; // room +0x46C, +0x470 (its TIM2: picture 0)
+        std::map<uint64_t, TextureView> g_projectedViews;
+        const TextureView *projectedTexture(const uint8_t *ram)
+        {
+            const uint64_t key = 0x3C00000000000000ull | uint64_t(g_projectedTim2) << 24 ^ g_projectedRecord;
+            auto found = g_projectedViews.find(key);
+            if (found != g_projectedViews.end())
+                return found->second.texture ? &found->second : nullptr;
+            TextureView &view = g_projectedViews[key];
+            const std::vector<uint32_t> pictures = tim2Pictures(ram, g_projectedTim2);
+            if (pictures.empty())
+                return nullptr;
+            view.key = key;
+            view.texture = decodeTim2Picture(at(ram, pictures[0]), 0, key);
+            if (!view.texture)
+                return nullptr;
+            const uint64_t tex0 = r64(ram, g_projectedRecord + 0x20);
+            const float pw = float(1u << ((tex0 >> 26) & 15u)), ph = float(1u << ((tex0 >> 30) & 15u));
+            const uint32_t place = r32(ram, g_projectedRecord + 0x10);
+            const float w = float(view.texture->width), h = float(view.texture->height);
+            view.su = pw / w, view.ou = -float(place & 0xFFFFu) / w;
+            view.sv = ph / h, view.ov = -float(place >> 16) / h;
+            return &view;
+        }
+        const bool projectedOn = [] {
+            const char *v = std::getenv("JC2_PROJECTED");
+            return !(v && v[0] == '0');
+        }();
+        uint64_t g_projectedBatches = 0;
+        void roomDraw(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+        {
+            g_projectedRecord = r32(ram, ctx->r[4].uw[0] + 0x46Cu);
+            const uint32_t tim2 = r32(ram, ctx->r[4].uw[0] + 0x470u);
+            if (tim2 != g_projectedTim2)
+                g_projectedViews.clear(); // another room (its picture may be at the same place next time: decode again)
+            g_projectedTim2 = tim2;
+            if (traceEffects)
+            {
+                static int shown = 0;
+                if (shown++ < 3)
+                    std::printf("[jc2:fx] room draw %#x: record %#x, +0 %#x\n", ctx->r[4].uw[0], g_projectedRecord,
+                                r32(ram, ctx->r[4].uw[0]));
+            }
+            rt->functions.generated(kRoomDraw)(ram, ctx, rt);
+        }
+
         // ---- The draws ----
         constexpr uint32_t kStaticBuilder = 0x00149350u;  // (context, ...): one node's parts
         constexpr uint32_t kStaticMaterial = 0x00149CE0u; // (packet, material, ...)
@@ -584,6 +660,58 @@ namespace jc2
             batch.alpha = material.alpha;
             batch.test = material.test;
 
+            // The projected second pass (static only).
+            const TextureView *projectedView = nullptr;
+            Mat projector{};
+            float lift[3] = {0, 0, 0};
+            if (traceEffects && !skinned && (material.flags & 0x800u))
+            {
+                static int shown = 0;
+                if (shown++ < 6)
+                    std::printf("[jc2:fx] 0x800 material: camera +0x440 %#x record %#x view %d\n", r32(ram, camera + 0x440),
+                                g_projectedRecord, g_projectedTim2 ? projectedTexture(ram) != nullptr : -1);
+            }
+            if (!skinned && (material.flags & 0x800u) && !r32(ram, camera + 0x440) && g_projectedRecord && projectedOn)
+            {
+                projectedView = g_projectedTim2 ? projectedTexture(ram) : nullptr;
+                projector = readMat(ram, camera + 0x3B0); // VU[34..37]: world to texture (camera +0x3F0 is the box test's)
+                lift[0] = rf(ram, g_context + 0x40), lift[1] = rf(ram, g_context + 0x44), lift[2] = rf(ram, g_context + 0x48);
+                if (traceEffects && projectedView && g_projectedBatches < 4)
+                    std::printf("[jc2:fx] projected record %#x P %.4f %.4f %.4f %.4f / %.4f %.4f %.4f %.4f / %.4f %.4f %.4f "
+                                "%.4f / %.4f %.4f %.4f %.4f lift %.3f %.3f %.3f\n",
+                                g_projectedRecord, projector.m[0], projector.m[1], projector.m[2], projector.m[3],
+                                projector.m[4], projector.m[5], projector.m[6], projector.m[7], projector.m[8],
+                                projector.m[9], projector.m[10], projector.m[11], projector.m[12], projector.m[13],
+                                projector.m[14], projector.m[15], lift[0], lift[1], lift[2]);
+            }
+            bozo::render::MeshBatch projected;
+            float projectedMin[2] = {1e30f, 1e30f}, projectedMax[2] = {-1e30f, -1e30f};
+            if (projectedView)
+            {
+                projected.textured = true;
+                projected.texture = projectedView->texture;
+                projected.tex0 = projectedView->key;
+                projected.setsTex0 = true;
+                projected.blended = true;
+                projected.setsAlpha = projected.setsTest = projected.setsZbuf = true;
+                projected.alpha = 0x46;      // (0 - Cd) As + Cd: drawn black, its alpha darkens
+                projected.test = 0x50000;    // depth GEQUAL, no alpha test
+                projected.depthMasked = true; // no depth write
+                projected.clampU = projected.clampV = true;
+            }
+            auto projectedVertex = [&](const bozo::render::Vertex &v) {
+                bozo::render::Vertex out = v;
+                const float p[4] = {v.x + lift[0], v.y + lift[1], v.z + lift[2], 1.0f};
+                float st[4];
+                apply(projector, p, st);
+                projectedMin[0] = std::min(projectedMin[0], st[0]), projectedMax[0] = std::max(projectedMax[0], st[0]);
+                projectedMin[1] = std::min(projectedMin[1], st[1]), projectedMax[1] = std::max(projectedMax[1], st[1]);
+                out.u = st[0] * projectedView->su + projectedView->ou;
+                out.v = st[1] * projectedView->sv + projectedView->ov;
+                out.rgba = 0x80000000u;
+                return out;
+            };
+
             const packs::MeshSection *nrmSection = object->section(packs::fourcc("NRM "));
             const packs::MeshSection *uvSection = object->section(packs::fourcc("UV  "));
             const float *positions = object->positions;
@@ -701,6 +829,9 @@ namespace jc2
                             batch.vertices.push_back(strip[i - 2]);
                             batch.vertices.push_back(strip[i - 1]);
                             batch.vertices.push_back(strip[i]);
+                            if (projectedView)
+                                for (uint32_t k = i - 2; k <= i; ++k)
+                                    projected.vertices.push_back(projectedVertex(strip[k]));
                         }
                     }
                     wind *= windX;
@@ -709,6 +840,14 @@ namespace jc2
             if (batch.vertices.empty())
                 return;
             draw.batches.push_back(std::move(batch));
+            // The builder's box test (0x13F800 against the projector), as the texture coordinates' range: a part wholly
+            // past the texture's edge is not drawn again.
+            if (projectedView && !projected.vertices.empty() && projectedMax[0] >= 0.0f && projectedMin[0] <= 1.0f &&
+                projectedMax[1] >= 0.0f && projectedMin[1] <= 1.0f)
+            {
+                draw.batches.push_back(std::move(projected));
+                ++g_projectedBatches;
+            }
             ++g_drawn;
             (draw.batches[0].blended ? g_blended : g_opaque).push_back(std::move(draw));
         }
@@ -903,25 +1042,8 @@ namespace jc2
                 return texture;
             }
             // A resident record: the bank slot holding it.
-            for (uint32_t bank = 0; bank < 4; ++bank)
-            {
-                const uint32_t entry = kTextureBanks + bank * 52u, mask = r32(ram, entry + 0x18);
-                for (uint32_t slot = 0; slot < 4; ++slot)
-                {
-                    if (!(mask & (1u << slot)))
-                        continue;
-                    const uint32_t at = entry + 0x1C + slot * 12u, count = r32(ram, at + 4), records = r32(ram, at + 8);
-                    if (record < records || record >= records + count * 0x60u || (record - records) % 0x60u)
-                        continue;
-                    uint8_t material[0x10] = {};
-                    material[0xC] = static_cast<uint8_t>(bank), material[0xD] = static_cast<uint8_t>(slot);
-                    const uint32_t index = (record - records) / 0x60u;
-                    material[0xE] = static_cast<uint8_t>(index), material[0xF] = static_cast<uint8_t>(index >> 8);
-                    const TextureView *view = materialTexture(ram, material);
-                    return view ? view->texture : nullptr;
-                }
-            }
-            return nullptr;
+            const TextureView *view = residentRecord(ram, record);
+            return view ? view->texture : nullptr;
         }
 
         bozo::render::Material effectMaterial(uint32_t flags, uint32_t blend, bool textured, bool pass)
@@ -1185,10 +1307,11 @@ namespace jc2
         drawFades();
         if (++g_frames % 600 == 0 && (g_drawn || g_missing))
             std::printf("[jc2:meshes] frames %llu: %llu parts drawn, %llu not found, %llu shadows (%llu calls, %llu without the bit, %llu culled, "
-                        "%llu without a texture)\n",
+                        "%llu without a texture), %llu projected passes\n",
                         (unsigned long long)g_frames, (unsigned long long)g_drawn, (unsigned long long)g_missing,
                         (unsigned long long)g_shadows, (unsigned long long)g_shadowCalls, (unsigned long long)g_shadowNoBit,
-                        (unsigned long long)g_shadowCulled, (unsigned long long)g_shadowNoTexture);
+                        (unsigned long long)g_shadowCulled, (unsigned long long)g_shadowNoTexture,
+                        (unsigned long long)g_projectedBatches);
         g_opaque.clear();
         g_blended.clear();
     }
@@ -1212,5 +1335,6 @@ namespace jc2
         r.registerFunction(kScreenFade, screenFade);
         r.registerFunction(kPrimitiveDrawer, primitiveDrawer);
         r.registerFunction(kDepthOfField, depthOfField);
+        r.registerFunction(kRoomDraw, roomDraw);
     }
 } // namespace jc2

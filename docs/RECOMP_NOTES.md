@@ -566,7 +566,15 @@ Mapped from a RAM dump of the first scene and the disc (subagent analysis, `buil
   C2 d2 + ambient) x base) x scale, truncated. base = the material colour, or the vertex colour / 127 when the material
   has bit 1 (the room: its colours are a bake that the lights still multiply); scale = VU[1] (255), times 0.502
   for textured materials (bit 5 without bit 8); alpha 128. Unlit (program bit 0): base x scale. The same maths in
-  both paths (0x57D per vertex, 0x479 for the room's flag-0x4000 batches). Not ported: flag 0x800's second pass
-  (0x4BC: the batch again with texture coordinates projected from the position by VU[34..37], colour 128).
+  both paths (0x57D per vertex, 0x479 for the room's flag-0x4000 batches).
+- **Projected texture** (program B flag 0x800, second pass at 0x4BC): the batch again in GS context 2, colour 128,
+  s, t = P (position + W's translation), P = VU[34..37] = camera +0x3B0 (world to texture; camera +0x3F0 is the
+  box test's), perspective-correct. The room function 0x195EA0(room) keeps the texture: record at room +0x46C, TIM2 at
+  +0x470 (picture 0); 0x14A800 sets context 2 from the record: TFX modulate, CLAMP 5, ALPHA 0x46 = (0 - Cd) As + Cd,
+  TEST depth GEQUAL without depth or alpha write. The builder sets the flag when the material has 0x800, camera +0x440
+  is 0 and the node's box is inside camera +0x3F0 x W. The first scene's is a black picture with a soft round alpha,
+  a dark spot on the floor at the warp circle (x within 0.75, z within 0.6 of the room's origin). Native: a second
+  batch in the part's draw (black vertices, the texture's alpha darkens; BozoEngine's MeshBatch got clampU/V for it),
+  skipped when its texture coordinates miss 0..1 (the box test). JC2_PROJECTED=0 turns it off.
 - The model batches set the depth write themselves (the mesh submitter keeps the last batch's ZBUF: after the first
   shadow, nothing wrote depth and the shop counter was drawn over).
