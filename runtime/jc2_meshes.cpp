@@ -20,6 +20,11 @@
 #include "bozo/render/mesh_draw.h"
 #include "bozo/render/mesh_pack.h"
 #include "bozo/render/renderer.h"
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#define PSAPI_VERSION 2 // GetProcessMemoryInfo from kernel32
+#include <psapi.h>
 #include "bozo/render/texture.h"
 #include <memory>
 #include <algorithm>
@@ -40,6 +45,7 @@
 namespace jc2
 {
     std::shared_ptr<const bozo::render::Texture> decodeTim2Picture(const uint8_t *header, uint32_t palette, uint64_t key);
+    size_t pictureCacheSize();
 
     namespace
     {
@@ -276,7 +282,6 @@ namespace jc2
             uint64_t key = 0;
         };
         std::map<uint32_t, TextureView> g_textures; // by record address; cleared when a slot is registered
-        uint64_t g_textureGeneration = 1;
 
         // The TIM2's picture headers.
         std::vector<uint32_t> tim2Pictures(const uint8_t *ram, uint32_t tim2)
@@ -331,7 +336,6 @@ namespace jc2
         void textureSlot(uint8_t *ram, R5900Context *ctx, Runtime *rt)
         {
             g_textures.clear();
-            ++g_textureGeneration;
             if (traceLoad)
             {
                 const uint32_t records = ctx->r[7].uw[0];
@@ -374,7 +378,10 @@ namespace jc2
                                  slot, index, tim2);
                 return nullptr;
             }
-            view.key = 0x3D00000000000000ull | (g_textureGeneration << 32) | record;
+            // By record only: the forest registers a slot every frame, and a key with the registration's generation in
+            // it decoded every texture again under a new key each frame, the picture cache keeping them all (4 GB a
+            // minute). A picture whose bytes changed at the same record is decoded again by that cache's check.
+            view.key = 0x3D00000000000000ull | record;
             view.texture = decodeTim2Picture(at(ram, pictures[index]), 0, view.key);
             if (!view.texture)
                 return nullptr;
@@ -1328,6 +1335,16 @@ namespace jc2
                         (unsigned long long)g_shadows, (unsigned long long)g_shadowCalls, (unsigned long long)g_shadowNoBit,
                         (unsigned long long)g_shadowCulled, (unsigned long long)g_shadowNoTexture,
                         (unsigned long long)g_projectedBatches, (unsigned long long)g_effectDraws);
+        if (g_frames % 600 == 0 && std::getenv("JC2_TRACE_MEMORY"))
+        {
+            PROCESS_MEMORY_COUNTERS_EX m{};
+            GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&m), sizeof(m));
+            std::printf("[jc2:memory] frame %llu: %llu MB private; caches: %zu pictures, %zu textures, %zu projected, %zu "
+                        "effect textures; %zu opaque, %zu blended draws\n",
+                        (unsigned long long)g_frames, (unsigned long long)(m.PrivateUsage >> 20), pictureCacheSize(),
+                        g_textures.size(), g_projectedViews.size(), g_effectTextures.size(), g_opaque.size(),
+                        g_blended.size());
+        }
         g_opaque.clear();
         g_blended.clear();
     }

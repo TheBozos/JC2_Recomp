@@ -72,6 +72,14 @@ namespace jc2
         // A TIM2 picture decoded from its header at `h` (in EE RAM or in a file read from the disc), cached by `key`.
         std::shared_ptr<const bozo::render::Texture> decodePicture(const uint8_t *h, uint32_t paletteIndex, uint64_t key)
         {
+            static const bool traceMemory = std::getenv("JC2_TRACE_MEMORY") != nullptr;
+            static unsigned shownKeys = 0;
+            if (traceMemory && pictures.size() > 3000 && shownKeys < 40 && !pictures.count({key, paletteIndex}))
+            {
+                ++shownKeys;
+                std::printf("[jc2:memory] new picture key %#llx palette %u from %p\n", (unsigned long long)key, paletteIndex,
+                            __builtin_return_address(0));
+            }
             const uint32_t imageBytes = get32(h + 8);
             const uint16_t header = get16(h + 12), colours = get16(h + 14);
             const uint8_t clutType = h[18], imageType = h[19];
@@ -541,6 +549,8 @@ namespace jc2
     }
 
     // A TIM2 picture (its header in EE memory) decoded, for the 3D models' textures (runtime/jc2_meshes.cpp).
+    size_t pictureCacheSize() { return pictures.size(); } // bring-up: the decoded pictures kept
+
     std::shared_ptr<const bozo::render::Texture> decodeTim2Picture(const uint8_t *header, uint32_t palette, uint64_t key)
     {
         return decodePicture(header, palette, key);
