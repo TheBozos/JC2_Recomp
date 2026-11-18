@@ -129,6 +129,10 @@ static int run(int argc, char **argv)
     // JC2_TRACE_SIF=1: the IOP modules the game asks for and the RPC services it binds.
     const bool traceSif = std::getenv("JC2_TRACE_SIF") != nullptr;
     jc2::installAudio(host.libraries(), traceSif);
+    // A disc read finishes after the drive's time, its callback then: the title menu clears its glow texture's
+    // pointer right after asking for it and counts on the read's callback setting it later (otherwise the menu's
+    // records land in a zero-size block and the save loaded there fails its check).
+    host.libraries().cd.timedCompletion = true;
     std::string error;
     if (!host.setUp(d, jc2_external_table, jc2_external_count, &registry, error))
     {

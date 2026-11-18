@@ -29,6 +29,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -231,7 +232,11 @@ namespace jc2
                             r32(ram, desc), dest, r32(ram, desc + 0xC), r32(ram, desc + 0x10), r32(ram, desc + 0x14),
                             r32(ram, desc + 0x18), r32(ram, desc + 0x1C), ctx->r[31].uw[0]);
             (void)dest;
+            const uint32_t where = r32(ram, desc + 0x18);
+            const uint32_t before = where ? r32(ram, where) : 0;
             rt->functions.generated(kResourceRequest)(ram, ctx, rt);
+            if (traceLoad && where)
+                std::printf("[jc2:load]   id %u: *%#x %#x -> %#x at return\n", id, where, before, r32(ram, where));
         }
 
         // 0x150340(request): the CD thread's request done. Its state (0x6CC770 + 0x201C: +0 the request, +0x3C bytes,
@@ -1102,6 +1107,17 @@ namespace jc2
             const uint32_t obj = ctx->r[4].uw[0];
             const uint32_t flags = r32(ram, obj);
             const uint32_t path = flags & 0x1C1Fu & ~8u; // the program C path bits other than the shadow's
+            if (traceEffects)
+            {
+                static std::set<uint64_t> seen;
+                const uint64_t sig = uint64_t(flags) << 32 | uint32_t(ram[obj + 4]) << 8 | (r32(ram, obj + 8) ? 1u : 0u) |
+                                     (ctx->r[8].uw[0] ? 2u : 0u);
+                if (seen.size() < 64 && seen.insert(sig).second)
+                    std::printf("[jc2:fx] drawer flags 0x%x blend %u textured %u pass %u count %u record 0x%x tim2 0x%x "
+                                "picture %d caller 0x%x\n",
+                                flags, ram[obj + 4], r32(ram, obj + 8), ctx->r[8].uw[0], r32(ram, obj + 0x34),
+                                ctx->r[5].uw[0], ctx->r[6].uw[0], static_cast<int32_t>(ctx->r[9].uw[0]), ctx->r[31].uw[0]);
+            }
             if (!meshesOff && (flags & 8u) == 0 && (flags & 0x400u) == 0 && (path & (4u | 0x10u)))
             {
                 const uint32_t camera = r32(ram, 0x006CC5F4u + 4u * (ctx->r[7].uw[0] & 3u));
@@ -1307,11 +1323,11 @@ namespace jc2
         drawFades();
         if (++g_frames % 600 == 0 && (g_drawn || g_missing))
             std::printf("[jc2:meshes] frames %llu: %llu parts drawn, %llu not found, %llu shadows (%llu calls, %llu without the bit, %llu culled, "
-                        "%llu without a texture), %llu projected passes\n",
+                        "%llu without a texture), %llu projected passes, %llu effect draws\n",
                         (unsigned long long)g_frames, (unsigned long long)g_drawn, (unsigned long long)g_missing,
                         (unsigned long long)g_shadows, (unsigned long long)g_shadowCalls, (unsigned long long)g_shadowNoBit,
                         (unsigned long long)g_shadowCulled, (unsigned long long)g_shadowNoTexture,
-                        (unsigned long long)g_projectedBatches);
+                        (unsigned long long)g_projectedBatches, (unsigned long long)g_effectDraws);
         g_opaque.clear();
         g_blended.clear();
     }

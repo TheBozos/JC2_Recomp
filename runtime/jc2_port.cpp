@@ -109,9 +109,12 @@ namespace jc2
         {
             static int depth = 0;
             static unsigned calls = 0;
-            if (std::getenv("JC2_TRACE_SIF") && (calls++ < 64 || (calls > 200000 && calls < 200040)))
-                std::printf("[jc2:sif] EE 0x%x command 0x%x, %zu bytes in, %zu out (depth %d)\n", service, command,
-                            in.size(), out.size(), depth);
+            static unsigned nested = 0;
+            if (std::getenv("JC2_TRACE_SIF") &&
+                (calls++ < 64 || calls % 2000 == 0 || (depth > 0 && nested++ < 200)))
+                std::printf("[jc2:sif] EE 0x%x command 0x%x, %zu bytes in, %zu out (depth %d, call %u, vblank %llu)\n",
+                            service, command, in.size(), out.size(), depth, calls,
+                            (unsigned long long)bozo::port::vblankCount(rt));
             if (depth > 4)
                 throw std::runtime_error("JC2 EE RPC handlers nested too deep");
             struct Depth { Depth() { ++depth; } ~Depth() { --depth; } } guard;
@@ -123,11 +126,27 @@ namespace jc2
             handler.r[28].ud[0] = gp;
             handler.r[29].ud[0] = stack + 0x800u;
             handler.r[31].ud[0] = 0u;
-            handler.cycleLimit = ~0ull; // no stop: it runs to its end
             // Its clock starts at the EE's now (the dispatcher reads guest time from the running context's cycles).
             handler.cycles = bozo::port::now(rt);
+            // A native out-call on a context of its own (kernel.md section 3b): nothing stops it, not even its jumps
+            // through registers (0x234A60's command table), which outside an out-call go back to the dispatcher and
+            // drop every frame below: the EE thread's call into the IOP, the IOP task asking, this handler.
+            auto &dispatcher = dynamic_cast<bozo::ee::Dispatcher &>(*rt->services);
+            dispatcher.beginOutcall(&handler);
+            struct End
+            {
+                bozo::ee::Dispatcher &d;
+                R5900Context *c;
+                ~End() { d.endOutcall(c); }
+            } end{dispatcher, &handler};
+            if (!dispatcher.ownContext(&handler))
+                throw std::runtime_error("JC2 EE RPC handler called outside guest code");
+            handler.cycleLimit = ~0ull; // no stop: it runs to its end
             rt->functions.generated(function)(ram, &handler, rt);
             const uint32_t reply = handler.r[2].uw[0];
+            if (std::getenv("JC2_TRACE_SIF") && calls < 64)
+                std::printf("[jc2:sif] EE 0x%x command 0x%x done: reply 0x%x, pc 0x%x (vblank %llu)\n", service, command,
+                            reply, handler.pc, (unsigned long long)bozo::port::vblankCount(rt));
             if (!out.empty())
             {
                 if (!reply)
@@ -168,8 +187,87 @@ namespace jc2
         ctx->pc = ra;
     }
 
+    // Save loading (JC2_TRACE_SAVE=1): the CRC check 0x166390(length, data, ...): CRC32 of `length` bytes against the
+    // word after them, 1 when it matches; and the card poll 0x165640(&command, &result): 0 busy, 1 done, 2 error.
+    const bool traceSave = std::getenv("JC2_TRACE_SAVE") != nullptr;
+    void saveCrc(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+    {
+        const uint32_t length = ctx->r[4].uw[0], data = ctx->r[5].uw[0], a2 = ctx->r[6].uw[0], ra = ctx->r[31].uw[0];
+        rt->functions.generated(0x166390u)(ram, ctx, rt);
+        uint32_t stored = 0, first = 0;
+        if (data + length + 4 <= 0x2000000u)
+            std::memcpy(&stored, ram + data + length, 4), std::memcpy(&first, ram + data, 4);
+        std::printf("[jc2:save] crc(0x%x, 0x%x, 0x%x) from 0x%x: stored 0x%08x, first word 0x%08x -> %u\n", length, data, a2,
+                    ra, stored, first, ctx->r[2].uw[0]);
+    }
+    void cardPoll(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+    {
+        const uint32_t command = ctx->r[4].uw[0], result = ctx->r[5].uw[0], ra = ctx->r[31].uw[0];
+        rt->functions.generated(0x165640u)(ram, ctx, rt);
+        if (ctx->r[2].uw[0] != 0)
+        {
+            uint32_t c = 0, r = 0;
+            std::memcpy(&c, ram + (command & 0x1FFFFFFu), 4), std::memcpy(&r, ram + (result & 0x1FFFFFFu), 4);
+            std::printf("[jc2:save] poll from 0x%x -> %u (command %d, result %d)\n", ra, ctx->r[2].uw[0], int32_t(c), int32_t(r));
+        }
+    }
+
+    // The game's pool: 0x152160(pool, size) allocates, 0x152240(pool, block) frees (blocks around the save buffer).
+    bool poolTraced(uint32_t a) { return a >= 0x1B00000u && a < 0x1B60000u; }
+    void poolAlloc(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+    {
+        const uint32_t pool = ctx->r[4].uw[0], size = ctx->r[5].uw[0], ra = ctx->r[31].uw[0];
+        rt->functions.generated(0x152160u)(ram, ctx, rt);
+        if (poolTraced(ctx->r[2].uw[0]))
+            std::printf("[jc2:pool] alloc(0x%x, 0x%x) = 0x%x from 0x%x (vblank %llu)\n", pool, size, ctx->r[2].uw[0], ra,
+                        (unsigned long long)bozo::port::vblankCount(rt));
+    }
+    void poolFree(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+    {
+        if (poolTraced(ctx->r[5].uw[0]))
+            std::printf("[jc2:pool] free(0x%x, 0x%x) from 0x%x (vblank %llu)\n", ctx->r[4].uw[0], ctx->r[5].uw[0],
+                        ctx->r[31].uw[0], (unsigned long long)bozo::port::vblankCount(rt));
+        rt->functions.generated(0x152240u)(ram, ctx, rt);
+    }
+
+    // Bring-up probe (JC2_TRACE_STREAM=1): a function's calls with their arguments and result (the sound stream's EE
+    // side: the M2SOUND server's helpers).
+    const bool traceStream = std::getenv("JC2_TRACE_STREAM") != nullptr;
+    template <uint32_t Address> void traceCall(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+    {
+        static unsigned n = 0;
+        const uint32_t a0 = ctx->r[4].uw[0], a1 = ctx->r[5].uw[0], a2 = ctx->r[6].uw[0], a3 = ctx->r[7].uw[0],
+                       ra = ctx->r[31].uw[0];
+        if (bozo::port::vblankCount(rt) > 3000 && n < 400)
+            std::printf("[jc2:stream] enter 0x%x(0x%x, 0x%x) from 0x%x, pc 0x%x\n", Address, a0, a1, ra, ctx->pc);
+        if (auto f = rt->functions.generated(Address))
+            f(ram, ctx, rt);
+        else
+        {
+            bozo::port::callLibrary(rt, ctx, Address);
+            ctx->pc = ra;
+        }
+        if (bozo::port::vblankCount(rt) > 3000 && n++ < 400)
+            std::printf("[jc2:stream] 0x%x(0x%x, 0x%x, 0x%x, 0x%x) from 0x%x -> 0x%x (vblank %llu)\n", Address, a0, a1, a2,
+                        a3, ra, ctx->r[2].uw[0], (unsigned long long)bozo::port::vblankCount(rt));
+    }
+
     void install(Runtime &, bozo::port::Registry &r)
     {
+        if (traceStream)
+        {
+            r.registerFunction(0x234a60u, traceCall<0x234a60u>); // the M2SOUND EE server's handler
+            r.registerFunction(0x486920u, traceCall<0x486920u>);
+            r.registerFunction(0x4869c0u, traceCall<0x4869c0u>);
+            r.registerFunction(0x2360f0u, traceCall<0x2360f0u>);
+        }
+        if (traceSave)
+        {
+            r.registerFunction(0x152160u, poolAlloc);
+            r.registerFunction(0x152240u, poolFree);
+            r.registerFunction(0x166390u, saveCrc);
+            r.registerFunction(0x165640u, cardPoll);
+        }
         r.registerFunction(0x117cd0u, traceLibrary<0x117cd0u>); // sceMpegInit
         r.registerFunction(0x117d70u, traceLibrary<0x117d70u>); // sceMpegCreate
         r.registerFunction(0x1181d0u, traceLibrary<0x1181d0u>); // sceMpegAddCallback
