@@ -550,6 +550,13 @@ namespace jc2
 
     // A TIM2 picture (its header in EE memory) decoded, for the 3D models' textures (runtime/jc2_meshes.cpp).
     size_t pictureCacheSize() { return pictures.size(); } // bring-up: the decoded pictures kept
+    // A save state was loaded: the pictures decoded from the old guest memory go.
+    void reset2D()
+    {
+        pictures.clear();
+        quads.clear();
+        serial = 0;
+    }
 
     std::shared_ptr<const bozo::render::Texture> decodeTim2Picture(const uint8_t *header, uint32_t palette, uint64_t key)
     {

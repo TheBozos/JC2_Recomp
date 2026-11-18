@@ -1371,3 +1371,43 @@ namespace jc2
         r.registerFunction(kRoomDraw, roomDraw);
     }
 } // namespace jc2
+
+namespace jc2
+{
+    // Save states (BozoEngine's bozo/state.h): where the game's model resources sit (noted as it loaded them, which a
+    // loaded state does not repeat) and the room's projected texture record. Everything decoded from guest memory is
+    // dropped on load.
+    void meshesState(bozo::state::Archive &a)
+    {
+        uint64_t n = bozo::state::count(a, g_loaded.size());
+        if (!a.loading())
+            for (auto &[base, l] : g_loaded)
+            {
+                uint32_t b = base;
+                bozo::state::fields(a, b, l.size, l.id);
+            }
+        else
+        {
+            g_loaded.clear();
+            for (uint64_t i = 0; i < n; ++i)
+            {
+                uint32_t base = 0;
+                Loaded l{};
+                bozo::state::fields(a, base, l.size, l.id);
+                g_loaded[base] = l;
+            }
+        }
+        bozo::state::fields(a, g_projectedRecord, g_projectedTim2);
+        if (a.loading())
+        {
+            g_textures.clear();
+            g_projectedViews.clear();
+            g_effectTextures.clear();
+            g_bySector.clear();
+            g_opaque.clear();
+            g_blended.clear();
+            g_fades.clear();
+            g_effects.clear();
+        }
+    }
+}

@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <set>
 #include <span>
 #include <stdexcept>
@@ -89,20 +90,19 @@ namespace jc2
     // and a stack at the bottom of that thread's stack (its top is in sceSifRpcLoop, which never returns).
     constexpr uint32_t kSifRegisterRpc = 0x0011D290u;
 
-    void sifRegisterRpc(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+    // Each registration, as data: a loaded save state registers them again (the game made them long before).
+    struct EeServer
     {
-        static const bool trace = std::getenv("JC2_TRACE_SIF") != nullptr;
-        const uint32_t service = ctx->r[5].uw[0], function = ctx->r[6].uw[0], buffer = ctx->r[7].uw[0];
-        const uint32_t gp = ctx->r[28].uw[0];
-        uint32_t stack = 0;
-        if (const auto *thread = bozo::port::kernel(rt).thread(bozo::port::currentThread(rt)))
-            stack = thread->stack;
-        if (trace)
-            std::printf("[jc2:sif] EE server 0x%x: function 0x%x buffer 0x%x, stack bottom 0x%x (ra 0x%x)\n", service,
-                        function, buffer, stack, ctx->r[31].uw[0]);
-        if (!stack || !rt->functions.generated(function))
-            throw std::runtime_error("JC2 EE RPC server without a thread stack or a compiled handler");
-        jc2_func_0x11d290(ram, ctx, rt);
+        uint32_t service = 0, function = 0, buffer = 0, gp = 0, stack = 0;
+    };
+    std::map<uint32_t, EeServer> eeServers;
+
+    void registerEeServer(Runtime *rt, const EeServer &server)
+    {
+        eeServers[server.service] = server;
+        uint8_t *ram = rt->memory.ram();
+        const uint32_t service = server.service, function = server.function, buffer = server.buffer, gp = server.gp,
+                       stack = server.stack;
         bozo::port::libraries(rt).sif.eeServers[service] =
             [ram, rt, function, buffer, gp, stack, service](uint32_t command, std::span<const uint8_t> in,
                                                              std::span<uint8_t> out)
@@ -154,6 +154,23 @@ namespace jc2
                 std::memcpy(out.data(), ram + (reply & 0x1FFFFFFu), out.size());
             }
         };
+    }
+
+    void sifRegisterRpc(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+    {
+        static const bool trace = std::getenv("JC2_TRACE_SIF") != nullptr;
+        const uint32_t service = ctx->r[5].uw[0], function = ctx->r[6].uw[0], buffer = ctx->r[7].uw[0];
+        const uint32_t gp = ctx->r[28].uw[0];
+        uint32_t stack = 0;
+        if (const auto *thread = bozo::port::kernel(rt).thread(bozo::port::currentThread(rt)))
+            stack = thread->stack;
+        if (trace)
+            std::printf("[jc2:sif] EE server 0x%x: function 0x%x buffer 0x%x, stack bottom 0x%x (ra 0x%x)\n", service,
+                        function, buffer, stack, ctx->r[31].uw[0]);
+        if (!stack || !rt->functions.generated(function))
+            throw std::runtime_error("JC2 EE RPC server without a thread stack or a compiled handler");
+        jc2_func_0x11d290(ram, ctx, rt);
+        registerEeServer(rt, {service, function, buffer, gp, stack});
     }
 
     // Bring-up probe (JC2_TRACE_MPEG=1): the movie player's slot check (0x155380, queue in a0): its count, capacity and fields.
@@ -285,5 +302,31 @@ namespace jc2
         if (const char *v = std::getenv("JC2_NATIVE_GRAPHICS"); v && v[0] == '1')
             r.nativeGraphics(&nativeInstruction);
         r.registerFunction(kIpuInit, ipuInit);
+    }
+
+    // Save states: the game's EE RPC servers, registered again on load (those of the run being replaced dropped).
+    void portState(bozo::state::Archive &a, Runtime &rt)
+    {
+        if (a.loading())
+            for (const auto &[service, server] : eeServers)
+                bozo::port::libraries(&rt).sif.eeServers.erase(service);
+        uint64_t n = bozo::state::count(a, eeServers.size());
+        std::map<uint32_t, EeServer> loaded;
+        if (!a.loading())
+            for (auto &[service, e] : eeServers)
+                bozo::state::fields(a, e.service, e.function, e.buffer, e.gp, e.stack);
+        else
+            for (uint64_t i = 0; i < n; ++i)
+            {
+                EeServer e;
+                bozo::state::fields(a, e.service, e.function, e.buffer, e.gp, e.stack);
+                loaded[e.service] = e;
+            }
+        if (a.loading())
+        {
+            eeServers.clear();
+            for (const auto &[service, e] : loaded)
+                registerEeServer(&rt, e);
+        }
     }
 } // namespace jc2

@@ -36,6 +36,15 @@ namespace jc2
             sound->notifyFrameCompleted();
     }
 
+    // Save states: the IOP's state (its memory, the modules' tasks, the mixer).
+    std::string audioUnsaveable() { return sound ? sound->unsaveable() : std::string(); }
+    void audioState(bozo::state::Archive &a)
+    {
+        if (!sound)
+            throw bozo::state::Error("save state: JC2's IOP modules are not set up");
+        sound->serialize(a);
+    }
+
     void installAudio(bozo::libs::Libraries &libraries, bool trace)
     {
         // The modules end at 0xC0500 (M2IMODE); the IOP heap the drivers allocate from starts above them.

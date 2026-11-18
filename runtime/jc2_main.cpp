@@ -40,6 +40,12 @@ namespace jc2
     void installAudio(bozo::libs::Libraries &, bool trace);
     void installDraw(Runtime &, bozo::port::Registry &);
     void installMeshes(Runtime &, bozo::port::Registry &);
+    // Save states: JC2's part (jc2_port.cpp, jc2_audio.cpp, jc2_meshes.cpp, jc2_2d.cpp).
+    void portState(bozo::state::Archive &, Runtime &);
+    void audioState(bozo::state::Archive &);
+    std::string audioUnsaveable();
+    void meshesState(bozo::state::Archive &);
+    void reset2D();
 } // namespace jc2
 
 static int run(int argc, char **argv)
@@ -84,6 +90,14 @@ static int run(int argc, char **argv)
             dumpRam = argv[++i];
         else if (a == "--profile-io")
             options.profileIo = true;
+        else if (a == "--load-state" && i + 1 < argc)
+            options.loadState = argv[++i];
+        else if (a == "--load-state-at" && i + 1 < argc)
+            options.loadStateFrame = std::stoul(argv[++i]);
+        else if (a == "--save-state" && i + 1 < argc)
+            options.saveState = argv[++i];
+        else if (a == "--save-state-at" && i + 1 < argc)
+            options.saveStateFrame = std::stoul(argv[++i]);
         else if (a == "--headless")
             window = false;
 #ifdef JC2_WITH_WINDOW
@@ -101,7 +115,8 @@ static int run(int argc, char **argv)
         else
         {
             std::fprintf(stderr, "Usage: jc2-headless [--frames N] [--pad-script FILE] [--card-dir DIR] [--elf FILE]\n"
-                                 "                    [--iso FILE] [--out FILE] [--dump-ram FILE] [--profile-io]\n");
+                                 "                    [--iso FILE] [--out FILE] [--dump-ram FILE] [--profile-io]\n"
+                                 "                    [--load-state FILE [--load-state-at FRAME]] [--save-state FILE --save-state-at FRAME]\n");
             return a == "--help" ? 0 : 2;
         }
     }
@@ -111,6 +126,7 @@ static int run(int argc, char **argv)
         options.cardDir = bozo::app::userDirectory().string();
 #endif
     options.realTime = window;
+    options.gameTag = "SLUS-20309";
     bozo::host::FreeHost host(options);
     bozo::ee::Dispatcher d(host);
     d.setFunctions(jc2_function_table, jc2_function_count, jc2_resume_table, jc2_resume_count);
@@ -133,6 +149,16 @@ static int run(int argc, char **argv)
     // pointer right after asking for it and counts on the read's callback setting it later (otherwise the menu's
     // records land in a zero-size block and the save loaded there fails its check).
     host.libraries().cd.timedCompletion = true;
+    // Save states: JC2's own part (the engine saves its runtime, libraries and host).
+    host.stateSections()->add({"jc2",
+                               [&](bozo::state::Archive &a) {
+                                   jc2::portState(a, d.runtime());
+                                   jc2::audioState(a);
+                                   jc2::meshesState(a);
+                                   if (a.loading())
+                                       jc2::reset2D();
+                               },
+                               [] { return jc2::audioUnsaveable(); }});
     std::string error;
     if (!host.setUp(d, jc2_external_table, jc2_external_count, &registry, error))
     {
@@ -224,6 +250,13 @@ static int run(int argc, char **argv)
         game.run = play;
         game.stop = [&] { host.requestStop(); };
         game.framesEnded = [&] { return host.framesEnded(); };
+        game.saveState = [&](int slot) { host.requestSave(bozo::app::stateSlotPath(slot)); };
+        game.loadState = [&](int slot) { host.requestLoad(bozo::app::stateSlotPath(slot)); };
+        host.onStateMessage = [](bool, const std::string &message)
+        {
+            std::fprintf(stderr, "[state] %s\n", message.c_str());
+            bozo::app::notify(message);
+        };
         const int result = bozo::app::runWindow(windowOptions, game, &devices);
         recording.close();
         return result;
