@@ -135,6 +135,7 @@ namespace jc2
             uint32_t size, id;
         };
         std::map<uint32_t, Loaded> g_loaded; // base -> resource
+        std::set<uint32_t> g_unknown;        // chains in no resource (discoverCopy), until the next load
 
         bool pack()
         {
@@ -204,15 +205,67 @@ namespace jc2
             while (it != g_loaded.end() && it->first < base + size)
                 it = g_loaded.erase(it);
             g_loaded[base] = {size, id};
+            g_unknown.clear();
+        }
+
+        // A resource the game copied in memory rather than loaded (the player's model, 2283, moved to the Room of
+        // Life's heap): no disc read tells where it went. Found from the copy itself: the model header ('0IVX00.1')
+        // before the chain, and the archive around it (u32 count, then the sub-files' offsets), whose model sub-file
+        // has the place and size the pack's index gives a resource. Addresses tried in vain are kept until the next
+        // load, so a chain in no resource costs one search.
+        bool discoverCopy(const uint8_t *ram, uint32_t chain)
+        {
+            if (!g_unknown.insert(chain).second)
+                return false;
+            constexpr uint32_t kSearch = 0x80000u;
+            for (uint32_t p = chain & ~0xFu; p + kSearch > chain && p >= 0x10u; p -= 0x10u)
+            {
+                if (std::memcmp(at(ram, p), "0IVX00.1", 8) != 0)
+                    continue;
+                for (const auto &[id, subs] : g_resources)
+                    for (const SubFile &sf : subs)
+                    {
+                        if (sf.offset > p || chain - p >= sf.size)
+                            continue;
+                        const uint32_t base = p - sf.offset;
+                        const uint32_t count = r32(ram, base);
+                        if (count == 0 || count > 255u)
+                            continue;
+                        bool listed = false;
+                        for (uint32_t k = 0; k < count && !listed; ++k)
+                            listed = r32(ram, base + 4u + 4u * k) == sf.offset;
+                        // The sub-file's size from the archive (the next offset), as the pack has it.
+                        if (!listed)
+                            continue;
+                        uint32_t next = 0;
+                        for (uint32_t k = 0; k < count; ++k)
+                            if (r32(ram, base + 4u + 4u * k) == sf.offset)
+                                next = k + 1 < count ? r32(ram, base + 8u + 4u * k) : 0u;
+                        if (next && next - sf.offset != sf.size)
+                            continue;
+                        noteLoaded(ram, id, base);
+                        if (traceLoad)
+                            std::printf("[jc2:loaded] id %u found copied at %#x (chain %#x)\n", id, base, chain);
+                        return true;
+                    }
+                return false; // the nearest header is the chain's model: no resource has it there
+            }
+            return false;
         }
 
         // A chain address (a submesh + 0x30) to its pack object.
-        const packs::MeshObject *lookup(uint32_t chain, uint32_t &resource)
+        const packs::MeshObject *lookup(const uint8_t *ram, uint32_t chain, uint32_t &resource)
         {
             chain &= 0x1FFFFFFu;
             auto it = g_loaded.upper_bound(chain);
-            if (it == g_loaded.begin())
-                return nullptr;
+            if (it == g_loaded.begin() || chain - std::prev(it)->first >= std::prev(it)->second.size)
+            {
+                if (!discoverCopy(ram, chain))
+                    return nullptr;
+                it = g_loaded.upper_bound(chain);
+                if (it == g_loaded.begin())
+                    return nullptr;
+            }
             --it;
             const uint32_t offset = chain - it->first;
             if (offset >= it->second.size)
@@ -223,7 +276,16 @@ namespace jc2
                 return nullptr;
             for (const SubFile &s : found->second)
                 if (offset >= s.offset && offset < s.offset + s.size && s.file < g_pack.files().size())
+                {
+                    // The memory may have gone to something else since (the game frees and copies models).
+                    if (std::memcmp(at(ram, it->first + s.offset), "0IVX00.1", 8) != 0)
+                    {
+                        g_loaded.erase(it);
+                        g_unknown.clear();
+                        return discoverCopy(ram, chain) ? lookup(ram, chain, resource) : nullptr;
+                    }
                     return g_pack.files()[s.file].object(offset - s.offset);
+                }
             return nullptr;
         }
 
@@ -610,7 +672,7 @@ namespace jc2
             if (meshesOff || !pack() || !g_context)
                 return;
             uint32_t resource = 0;
-            const packs::MeshObject *object = lookup(chain, resource);
+            const packs::MeshObject *object = lookup(ram, chain, resource);
             if (!object)
             {
                 if (g_missing++ < 16)
@@ -626,7 +688,10 @@ namespace jc2
             const Mat clipM = readMat(ram, camera + 0x2F0);
             const float windX = rf(ram, camera + 0x380), windY = rf(ram, camera + 0x384);
             Lights lights{readMat(ram, lightSet + 0xB0), readMat(ram, lightSet + 0xF0)};
-            const uint32_t programFlags = material.flags ^ 8u; // VU 53.x: bit 0 unlit, bit 3 cull back faces
+            // VU 53.x: bit 0 unlit, bit 3 cull back faces, as the material has them. (Read as "double-sided, the
+            // program gets flags ^ 8" until the Room of Life: its round wall, between the camera and the room, is
+            // culled on the console; the forest, the Temple and the throne room look the same either way.)
+            const uint32_t programFlags = material.flags;
             const bool unlit = programFlags & 1u, cull = programFlags & 8u;
 
             Mat world{};
@@ -735,6 +800,10 @@ namespace jc2
 
             std::vector<bozo::render::Vertex> strip;
             std::vector<float> screen; // x, y, w per strip vertex (for the back-face test)
+            // Per strip vertex: outside the camera's clip volume (+0x2F0). The programs drop a triangle with any such
+            // vertex (CLIP against |w|, checked against the microcode: build/bozo/analysis3/emu.py): a wall between
+            // the camera and the room is not drawn at all, where cutting it at the volume would keep its near part.
+            std::vector<uint8_t> outside;
             packs::StripCursor cursor(*object);
             packs::StripHeader header;
             const uint8_t *vertices;
@@ -760,6 +829,7 @@ namespace jc2
                     }
                 strip.clear();
                 screen.clear();
+                outside.clear();
                 for (uint32_t i = 0; i < header.vertexCount; ++i)
                 {
                     packs::StripVertex sv;
@@ -813,6 +883,10 @@ namespace jc2
                     float s4[4];
                     const float o4[4] = {v.x, v.y, v.z, 1.0f};
                     apply(screenM, o4, s4);
+                    float c4[4];
+                    apply(clipObject, o4, c4);
+                    const float cw = std::fabs(c4[3]);
+                    outside.push_back(std::fabs(c4[0]) > cw || std::fabs(c4[1]) > cw || std::fabs(c4[2]) > cw);
                     screen.push_back(s4[0]);
                     screen.push_back(s4[1]);
                     screen.push_back(s4[3]);
@@ -824,8 +898,8 @@ namespace jc2
                 {
                     if (i >= 2)
                     {
-                        bool keep = true;
-                        if (cull)
+                        bool keep = !(outside[i - 2] || outside[i - 1] || outside[i]);
+                        if (keep && cull)
                         {
                             const float *a = &screen[3 * (i - 2)], *b = &screen[3 * (i - 1)], *c = &screen[3 * i];
                             if (a[2] > 0 && b[2] > 0 && c[2] > 0)
@@ -861,6 +935,35 @@ namespace jc2
                 ++g_projectedBatches;
             }
             ++g_drawn;
+            // JC2_TRACE_DRAWS=n: every part drawn in the n-th frame since the run started (resource, sub-file offset,
+            // material, the area its vertices cover on screen).
+            static const uint64_t traceDrawsAt = [] {
+                const char *v = std::getenv("JC2_TRACE_DRAWS");
+                return v ? std::strtoull(v, nullptr, 10) : 0ull;
+            }();
+            if (traceDrawsAt && g_frames == traceDrawsAt)
+            {
+                float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+                unsigned behind = 0;
+                for (const bozo::render::Vertex &v : draw.batches[0].vertices)
+                {
+                    float s4[4];
+                    const float o4[4] = {v.x, v.y, v.z, 1.0f};
+                    apply(screenM, o4, s4);
+                    if (s4[3] <= 0)
+                        ++behind;
+                    else
+                    {
+                        const float x = s4[0] / s4[3], y = s4[1] / s4[3];
+                        x0 = std::min(x0, x), x1 = std::max(x1, x), y0 = std::min(y0, y), y1 = std::max(y1, y);
+                    }
+                }
+                std::printf("[jc2:draw] %s res %u chain %#x flags %#x prim %#llx alpha %#llx colour a %.2f tris %zu "
+                            "screen %.0f..%.0f x %.0f..%.0f behind %u%s\n",
+                            skinned ? "skinned" : "static", resource, chain, material.flags,
+                            (unsigned long long)material.prim, (unsigned long long)material.alpha, material.colour[3],
+                            draw.batches[0].vertices.size() / 3, x0, x1, y0, y1, behind, cull ? " cull" : "");
+            }
             (draw.batches[0].blended ? g_blended : g_opaque).push_back(std::move(draw));
         }
 
@@ -1398,12 +1501,19 @@ namespace jc2
             }
         }
         bozo::state::fields(a, g_projectedRecord, g_projectedTim2);
+        if (std::getenv("JC2_TRACE_STATE"))
+        {
+            std::printf("[jc2:state] %s: %zu loaded resources\n", a.loading() ? "loaded" : "saved", g_loaded.size());
+            for (const auto &[base, l] : g_loaded)
+                std::printf("[jc2:state]   %#x..%#x resource %u\n", base, base + l.size, l.id);
+        }
         if (a.loading())
         {
             g_textures.clear();
             g_projectedViews.clear();
             g_effectTextures.clear();
             g_bySector.clear();
+            g_unknown.clear();
             g_opaque.clear();
             g_blended.clear();
             g_fades.clear();

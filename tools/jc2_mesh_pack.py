@@ -43,9 +43,11 @@ def resources(game):
     return out
 
 
-def model_subfiles(data):
-    """[(offset, size)] of a resource's model sub-files ('0IVX'), [] if it is not an archive of them."""
-    if len(data) < 8:
+def model_subfiles(data, base=0, depth=0):
+    """[(offset, size)] of a resource's model sub-files ('0IVX'), offsets from the resource's start; [] if it is not an
+    archive of them. Archives nest: the Room of Life's resources (3309-3313, 3324-3329) keep their models in an archive
+    inside the resource's first sub-file."""
+    if len(data) < 8 or depth > 3:
         return []
     n = struct.unpack_from('<I', data, 0)[0]
     if not 0 < n < 256 or 4 + 4 * n > len(data):
@@ -53,7 +55,14 @@ def model_subfiles(data):
     offs = list(struct.unpack_from(f'<{n}I', data, 4)) + [len(data)]
     if any(b < a for a, b in zip(offs, offs[1:])) or offs[0] < 4 + 4 * n:
         return []
-    return [(offs[i], offs[i + 1] - offs[i]) for i in range(n) if data[offs[i]:offs[i] + 4] == b'0IVX']
+    out = []
+    for i in range(n):
+        sub = data[offs[i]:offs[i + 1]]
+        if sub[:4] == b'0IVX':
+            out.append((base + offs[i], offs[i + 1] - offs[i]))
+        elif sub[:4] != b'TIM2':
+            out += model_subfiles(sub, base + offs[i], depth + 1)
+    return out
 
 
 def convert(image):

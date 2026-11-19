@@ -517,7 +517,8 @@ Mapped from a RAM dump of the first scene and the disc (subagent analysis, `buil
 - **Model sub-file**: '0IVX' '00.1'/'00.2', 'LDMX', 'SKIN'/'NORM' (byte-reversed). v1 (characters, a few static):
   counts at +0x20, then groups (32 bytes), nodes (0x50), meshes (0x30 + {material, submesh} pairs), materials (0x60),
   submeshes. v2 (static): each node followed by its mesh and, per item, a 0x60 material then the submesh.
-- **Material** (0x60): +0 flags (2 prelit, 8 double-sided: the program gets flags ^ 8, 0x20 textured, 0x40 environment
+- **Material** (0x60): +0 flags (2 prelit, 8 back faces culled (the program gets the flags as they are; read as "double-sided,
+  flags ^ 8" until the Room of Life's wall showed otherwise), 0x20 textured, 0x40 environment
   map, 0x100 two-pass), +0xC bank, +0xD slot, +0xE index (texture record), +0x10 colour, +0x20 second colour, +0x30
   PRIM, +0x38 ALPHA_1, +0x40 CLAMP_1, +0x48 TEST_1, +0x50/+0x58 MIPTBP.
 - **Submesh**: {vertices, batches, qwc}, bounding box, then the chain at +0x30 (the DMA CALL target). A batch: (skinned)
@@ -536,6 +537,12 @@ Mapped from a RAM dump of the first scene and the disc (subagent analysis, `buil
   on the disc, 1,378 distinct, 30,322 submeshes, 7.5 M vertices: a 368 MB pack), plus a 'RESOURCES' index (resource id ->
   sub-files). The hooks note the builder's context and the material, the mesh call looks the chain up by (resource,
   offset) and draws it with the programs' maths on the CPU.
+- **Room of Life** (2026-11-19): its resources (3309-3313, 3324-3329) keep their models in an archive inside the
+  resource's first sub-file (the pack tool walks nested archives); the player's model (2283) is copied by the game
+  to the room's heap, not read from the disc, so a chain in no recorded load is matched from the copy itself (the
+  '0IVX00.1' header before it and its archive's sub-file layout against the pack's index); a triangle with a vertex
+  outside the camera's clip volume (+0x2F0, |x|, |y| or |z| > |w|) is dropped as the programs do, not cut; and
+  material bit 3 culls back faces (it is not "double-sided": the room's near wall is culled).
 - **Textures** (2026-11-16): a material's (bank, slot, index) gives its record and its slot's TIM2 picture; the UVs
   are in the record's GS page (TEX0 TW/TH) and remapped to the picture by its place (record +0x10). A slot registered
   without its TIM2 (a room's) is matched to a loaded resource's TIM2 sub-file with the same pictures. Palettes are
