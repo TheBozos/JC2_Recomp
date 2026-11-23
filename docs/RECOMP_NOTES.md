@@ -540,8 +540,9 @@ Mapped from a RAM dump of the first scene and the disc (subagent analysis, `buil
 - **Room of Life** (2026-11-19): its resources (3309-3313, 3324-3329) keep their models in an archive inside the
   resource's first sub-file (the pack tool walks nested archives); the player's model (2283) is copied by the game
   to the room's heap, not read from the disc, so a chain in no recorded load is matched from the copy itself (the
-  '0IVX00.1' header before it and its archive's sub-file layout against the pack's index); a triangle with a vertex
-  outside the camera's clip volume (+0x2F0, |x|, |y| or |z| > |w|) is dropped as the programs do, not cut; and
+  '0IVX00.1' header before it and its archive's sub-file layout against the pack's index); a skinned triangle with
+  a vertex outside the camera's clip volume (+0x2F0, |x|, |y| or |z| > |w|) is dropped as program A does (2026-11-23:
+  only A; program B cuts at the volume, dropping its triangles holed the battle arena's floor); and
   material bit 3 culls back faces (it is not "double-sided": the room's near wall is culled).
 - **Textures** (2026-11-16): a material's (bank, slot, index) gives its record and its slot's TIM2 picture; the UVs
   are in the record's GS page (TEX0 TW/TH) and remapped to the picture by its place (record +0x10). A slot registered

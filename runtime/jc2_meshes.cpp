@@ -888,9 +888,11 @@ namespace jc2
 
             std::vector<bozo::render::Vertex> strip;
             std::vector<float> screen; // x, y, w per strip vertex (for the back-face test)
-            // Per strip vertex: outside the camera's clip volume (+0x2F0). The programs drop a triangle with any such
-            // vertex (CLIP against |w|, checked against the microcode: build/bozo/analysis3/emu.py): a wall between
-            // the camera and the room is not drawn at all, where cutting it at the volume would keep its near part.
+            // Per strip vertex: outside the camera's clip volume (+0x2F0). Program A (skinned) drops a triangle with any
+            // such vertex (CLIP against |w|, checked against the microcode: build/bozo/analysis3/emu.py). Program B
+            // (static) does not: its CLIP groups (0x681, 0x778...) cut triangles at the volume, so its triangles go to
+            // the renderer whole and are clipped there (dropping them left holes in the battle arena's floor and cut
+            // the summoning circle short under a close camera).
             std::vector<uint8_t> outside;
             packs::StripCursor cursor(*object);
             packs::StripHeader header;
@@ -986,7 +988,7 @@ namespace jc2
                 {
                     if (i >= 2)
                     {
-                        bool keep = !(outside[i - 2] || outside[i - 1] || outside[i]);
+                        bool keep = !skinned || !(outside[i - 2] || outside[i - 1] || outside[i]);
                         if (keep && cull)
                         {
                             const float *a = &screen[3 * (i - 2)], *b = &screen[3 * (i - 1)], *c = &screen[3 * i];
