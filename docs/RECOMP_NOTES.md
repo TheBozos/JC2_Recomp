@@ -612,3 +612,21 @@ Mapped from SLUS_203.09 (`runtime/jc2_debug.cpp`), for testing without playing u
 - Build note: the externals list (`tools/jc2_bozo_overrides.py` over runtime/jc2_*.cpp, then bozo-externals) was
   rewritten on any runtime edit, which recompiled every overlay batch (~30 min at -j 4). It is now copied only when it
   changes (copy_if_different + Ninja restat); a new override still recompiles everything, as it must.
+
+## Battles drawn (2026-11-23)
+
+- **Battle stage**: the arena's models are single sub-files the game copies out of loaded resources (1737's pads to
+  0x1B906C0 and on, 1732's 62 KB arena to 0x1B9A000) and relocates (14-15 pointer words, header and node tables).
+  `discoverModelCopy` (runtime/jc2_meshes.cpp) matches such a copy against the loaded resources' model sub-files (at
+  most one word in 64 may differ) and keeps it in `g_copies` (found again from memory after a state load). A chain in
+  a resource's footprint but none of its models (the game reused the memory) is rediscovered too.
+- **Overlapping overlays** (BozoEngine): the Arena's lesson scripts (m2esA3xx at 0x96A800, to 0x96D6C0) span the
+  battle-effect slot 0x96B000; with an effect loaded there both headers match and the run ended ("ambiguous native
+  module identity"). The module starting higher now wins over the other's tail (FunctionTable::moduleAt; each module
+  keeps the lowest other start inside its span as its fast-path limit).
+- **Getting a real battle**: the Arena's tutorial (hub A015 = scene 50, menu Arena, talk to the lady): states
+  s23945_hub_menu, s24300_arena, s26200_arena_lesson. The battle's controls: Left/Right the command tables, L1 the four
+  colour tables, Triangle Items/Escape. A battle started with `--battle` from before the hatching (no minion) waits
+  forever; from s21900_battle_tamatoch it shows the hunter's minions but not the hunter (not yet compared with the
+  Arena's setup).
+- Open: an effect drawn as blocky yellow squares (frame 27150 of the lesson, a glow on the enemy minion).

@@ -136,6 +136,14 @@ namespace jc2
         };
         std::map<uint32_t, Loaded> g_loaded; // base -> resource
         std::set<uint32_t> g_unknown;        // chains in no resource (discoverCopy), until the next load
+        // Single models the game copied out of a loaded resource (the battle stage: resource 1737's sub-files copied
+        // to 0x1B906C0 and on, their header's pointers relocated): copy address -> the pack file. Found again from
+        // memory after a state load, so not saved.
+        struct Copy
+        {
+            uint32_t size, file;
+        };
+        std::map<uint32_t, Copy> g_copies;
 
         bool pack()
         {
@@ -213,6 +221,47 @@ namespace jc2
         // before the chain, and the archive around it (u32 count, then the sub-files' offsets), whose model sub-file
         // has the place and size the pack's index gives a resource. Addresses tried in vain are kept until the next
         // load, so a chain in no resource costs one search.
+        // The model at `copy` (its "0IVX00.1") as one of a loaded resource's model sub-files copied there: the same
+        // bytes except the pointers the game relocates (the header's, the node tables': 14 words in resource 1737's
+        // stage pads, 15 in 1732's 62 KB arena), so at most one word in 64 may differ.
+        bool sameModel(const uint8_t *ram, uint32_t source, uint32_t copy, uint32_t size)
+        {
+            uint32_t allowed = size / 256u + 4u, differ = 0;
+            for (uint32_t k = 8; k + 4 <= size; k += 4)
+                if (r32(ram, source + k) != r32(ram, copy + k) && ++differ > allowed)
+                    return false;
+            return true;
+        }
+
+        bool discoverModelCopy(const uint8_t *ram, uint32_t copy)
+        {
+            for (const auto &[base, loaded] : g_loaded)
+            {
+                auto found = g_resources.find(loaded.id);
+                if (found == g_resources.end())
+                    continue;
+                for (const SubFile &sf : found->second)
+                {
+                    const uint32_t source = base + sf.offset;
+                    if (sf.size < 0x100u || source == copy || copy + sf.size > 0x2000000u ||
+                        source + sf.size > 0x2000000u || std::memcmp(at(ram, source), "0IVX00.1", 8) != 0 ||
+                        !sameModel(ram, source, copy, sf.size))
+                        continue;
+                    auto it = g_copies.lower_bound(copy);
+                    if (it != g_copies.begin() && std::prev(it)->first + std::prev(it)->second.size > copy)
+                        it = std::prev(it);
+                    while (it != g_copies.end() && it->first < copy + sf.size)
+                        it = g_copies.erase(it);
+                    g_copies[copy] = {sf.size, sf.file};
+                    if (traceLoad)
+                        std::printf("[jc2:loaded] resource %u's model at +%#x found copied alone at %#x\n", loaded.id,
+                                    sf.offset, copy);
+                    return true;
+                }
+            }
+            return false;
+        }
+
         bool discoverCopy(const uint8_t *ram, uint32_t chain)
         {
             if (!g_unknown.insert(chain).second)
@@ -248,7 +297,7 @@ namespace jc2
                             std::printf("[jc2:loaded] id %u found copied at %#x (chain %#x)\n", id, base, chain);
                         return true;
                     }
-                return false; // the nearest header is the chain's model: no resource has it there
+                return discoverModelCopy(ram, p); // no archive has this model there: a model copied alone?
             }
             return false;
         }
@@ -257,14 +306,20 @@ namespace jc2
         const packs::MeshObject *lookup(const uint8_t *ram, uint32_t chain, uint32_t &resource)
         {
             chain &= 0x1FFFFFFu;
+            if (auto c = g_copies.upper_bound(chain); c != g_copies.begin())
+            {
+                --c;
+                if (chain - c->first < c->second.size)
+                {
+                    if (std::memcmp(at(ram, c->first), "0IVX00.1", 8) == 0 && c->second.file < g_pack.files().size())
+                        return g_pack.files()[c->second.file].object(chain - c->first);
+                    g_copies.erase(c); // the memory went to something else
+                }
+            }
             auto it = g_loaded.upper_bound(chain);
             if (it == g_loaded.begin() || chain - std::prev(it)->first >= std::prev(it)->second.size)
             {
-                if (!discoverCopy(ram, chain))
-                    return nullptr;
-                it = g_loaded.upper_bound(chain);
-                if (it == g_loaded.begin())
-                    return nullptr;
+                return discoverCopy(ram, chain) ? lookup(ram, chain, resource) : nullptr;
             }
             --it;
             const uint32_t offset = chain - it->first;
@@ -286,7 +341,9 @@ namespace jc2
                     }
                     return g_pack.files()[s.file].object(offset - s.offset);
                 }
-            return nullptr;
+            // In the resource's footprint but none of its models: the game put something else there since (a model
+            // copied over its pictures).
+            return discoverCopy(ram, chain) ? lookup(ram, chain, resource) : nullptr;
         }
 
         // 0x15C390(desc): a resource read queued (desc +0 flags, +4 resource id, +8 destination).
@@ -1509,6 +1566,7 @@ namespace jc2
         }
         if (a.loading())
         {
+            g_copies.clear();
             g_textures.clear();
             g_projectedViews.clear();
             g_effectTextures.clear();
