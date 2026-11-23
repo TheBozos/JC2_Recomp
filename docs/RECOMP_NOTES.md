@@ -629,4 +629,9 @@ Mapped from SLUS_203.09 (`runtime/jc2_debug.cpp`), for testing without playing u
   colour tables, Triangle Items/Escape. A battle started with `--battle` from before the hatching (no minion) waits
   forever; from s21900_battle_tamatoch it shows the hunter's minions but not the hunter (not yet compared with the
   Arena's setup).
-- Open: an effect drawn as blocky yellow squares (frame 27150 of the lesson, a glow on the enemy minion).
+- **Effect textures**: a battle effect's particles (the sleep rings, frame 27150 of the lesson) get their texture record
+  from 0x13DB60(bank, slot, index) at the effect's set-up and keep a copy (0x1DD3D08 is the battle bank's record 12,
+  bank 1 slot 0 at 0xDD6CF0): not in any bank when drawn, they came out as flat yellow squares. `residentCopy` finds the
+  bank record with the same TEX0, place and size. JC2 prints "[jc2:fx] textured effect without a texture" with the
+  banks when one is still missing.
+- Open: one static mesh near resource 1595 (0x1B9DDB0) once in the lesson, not found.

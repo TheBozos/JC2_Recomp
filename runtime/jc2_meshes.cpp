@@ -513,6 +513,37 @@ namespace jc2
             return &view;
         }
 
+        const TextureView *residentRecord(const uint8_t *ram, uint32_t record);
+
+        // A copy of a resident record (a battle effect's particles keep copies of the battle bank's records): the bank
+        // record with the same TEX0, place and size, so the same picture of the same TIM2.
+        const TextureView *residentCopy(const uint8_t *ram, uint32_t record)
+        {
+            const uint64_t tex0 = r64(ram, record + 0x20);
+            const uint32_t place = r32(ram, record + 0x10), size = r32(ram, record + 0x14);
+            for (uint32_t bank = 0; bank < 4; ++bank)
+            {
+                const uint32_t entry = kTextureBanks + bank * 52u, mask = r32(ram, entry + 0x18);
+                for (uint32_t slot = 0; slot < 4; ++slot)
+                {
+                    if (!(mask & (1u << slot)))
+                        continue;
+                    const uint32_t at = entry + 0x1C + slot * 12u, count = std::min(r32(ram, at + 4), 1024u),
+                                   records = r32(ram, at + 8);
+                    if (records < 0x100000u || records + count * 0x60u > 0x2000000u)
+                        continue;
+                    for (uint32_t i = 0; i < count; ++i)
+                    {
+                        const uint32_t candidate = records + i * 0x60u;
+                        if (r64(ram, candidate + 0x20) == tex0 && r32(ram, candidate + 0x10) == place &&
+                            r32(ram, candidate + 0x14) == size)
+                            return residentRecord(ram, candidate);
+                    }
+                }
+            }
+            return nullptr;
+        }
+
         // A record held by a resident bank slot (found by its address).
         const TextureView *residentRecord(const uint8_t *ram, uint32_t record)
         {
@@ -1213,8 +1244,10 @@ namespace jc2
                 g_effectTextures[key] = texture;
                 return texture;
             }
-            // A resident record: the bank slot holding it.
+            // A resident record: the bank slot holding it, or the bank record it is a copy of.
             const TextureView *view = residentRecord(ram, record);
+            if (!view && record >= 0x100000u && record + 0x60u <= 0x2000000u)
+                view = residentCopy(ram, record);
             return view ? view->texture : nullptr;
         }
 
@@ -1293,6 +1326,24 @@ namespace jc2
                 std::shared_ptr<const bozo::render::Texture> texture;
                 if (textured)
                     texture = recordTexture(ram, ctx->r[5].uw[0], ctx->r[6].uw[0], static_cast<int32_t>(ctx->r[9].uw[0]));
+                if (textured && !texture)
+                {
+                    static std::set<uint32_t> missing;
+                    if (missing.size() < 16 && missing.insert(ctx->r[5].uw[0]).second)
+                    {
+                        std::fprintf(stderr, "[jc2:fx] textured effect without a texture: record %#x tim2 %#x picture %d;",
+                                     ctx->r[5].uw[0], ctx->r[6].uw[0], static_cast<int32_t>(ctx->r[9].uw[0]));
+                        for (uint32_t bank = 0; bank < 4; ++bank)
+                        {
+                            const uint32_t entry = kTextureBanks + bank * 52u;
+                            std::fprintf(stderr, " bank %u mask %#x", bank, r32(ram, entry + 0x18));
+                            for (uint32_t slot = 0; slot < 4; ++slot)
+                                std::fprintf(stderr, " [%#x %u %#x]", r32(ram, entry + 0x1C + slot * 12u),
+                                             r32(ram, entry + 0x20 + slot * 12u), r32(ram, entry + 0x24 + slot * 12u));
+                        }
+                        std::fputc('\n', stderr);
+                    }
+                }
                 ScreenDraw draw;
                 draw.material = effectMaterial(flags, ram[obj + 4], textured && texture, pass);
                 draw.texture = texture;
