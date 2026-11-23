@@ -585,3 +585,30 @@ Mapped from a RAM dump of the first scene and the disc (subagent analysis, `buil
   skipped when its texture coordinates miss 0..1 (the box test). JC2_PROJECTED=0 turns it off.
 - The model batches set the depth write themselves (the mesh submitter keeps the last batch's ZBUF: after the first
   shadow, nothing wrote depth and the shop counter was drawn over).
+
+## Scenes, teleport and battles (2026-11-23)
+
+Mapped from SLUS_203.09 (`runtime/jc2_debug.cpp`), for testing without playing up to a place:
+- **Scenes**: 1208 entries at 0x5AD4F0, 32 bytes: +0 the name's address, +4..+0x10 routines, +0x14 the event script
+  overlay (CDDATA resource, -1 for the forests), +0x18 a data resource, +0x1C the overlay's kind. 0-9 are the forests
+  (WIND, AQUA, FIRE, TERA, DWIND, DAQUA, DFIRE, DTERA, DLLTH, TUTO), then the m2es* scripts (38 m2esA001 = New game,
+  44 the Temple, 45 the Throne Room, 49 the Room of Life). Halfwords 0x87860C next (-1 none), 0x87860E current,
+  0x878610 previous. The scene task (0x1A1050) moves next into current and loads it (0x1A0D50 loads the overlay with
+  0x233AF0(resource, slot address)) between scenes; New game asks for 38 (0x1E58E0). A running event scene leaves
+  through its step 0x1E7B90(scene): scene +6 is 1 while the script runs, 3 waits for the scene's loads (0x151320)
+  and returns mode 2 if "next" is set; the caller keeps it in scene +0x1314 and the exit (0x1E7500) loads "next".
+  The teleport overrides that step: "next" and state 3 while the script runs.
+- **Modes**: bytes S+0 current, S+1 asked for (0xFF none), S = *(*0x6C4890 + 0x24) (gp 0x6CBC70 - 0x73E0; 0x1FAD00
+  asks). The title menu's table (0x4E8480, {mode, label}): NEW GAME 2, LOAD GAME 7, VERSUS 5, BATTLE 3, ARENA 0xD,
+  NETTRADE 0x15 (the retail menu shows three). Seen in states: 0 the title, 2 the game (forests and event
+  scenes alike), 3 a battle, 9 (the hatching menu) and 0xA (between scenes).
+- **Hunter battles** (an event's, 0x221B14): opponent records at 0x5F4B80 + 0x94 i (+0 name, +0x30 party): 0 Kahu, 4-18
+  the developers' TEST1-3 parties, 19-150 the hunters (Garon, Bazu, Hydra...). Setup at 0x8963EC (0x2918A0 returns
+  it): +8 the party, +4 -1, +0x38 and +0x3C 0; kind byte 0x89B071 = 3 (4 another event path, 0x1E and 8 other battles:
+  0x47D200, 0x2AC0C0); then 0x430E10 and mode 3.
+- **Use**: `--scene N [--scene-at F]`, `--battle N [--battle-at F]`; in the window F2 > Teleport and F2 > Battle.
+- Developer modes are still in the program (0x15C140, table 0x4E6FA0: MODESEL, CHARTEST, MAPTEST, BTLEFTEST,
+  BTLCAMTEST...); several read host0: files, so they are not used.
+- Build note: the externals list (`tools/jc2_bozo_overrides.py` over runtime/jc2_*.cpp, then bozo-externals) was
+  rewritten on any runtime edit, which recompiled every overlay batch (~30 min at -j 4). It is now copied only when it
+  changes (copy_if_different + Ninja restat); a new override still recompiles everything, as it must.

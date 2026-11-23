@@ -19,6 +19,7 @@ namespace jc2
 {
     void notifyFrame();
     void drawFrameEnd();
+    void debugFrameWait(uint8_t *ram, R5900Context *ctx, Runtime *rt);
 
     // The frame wait. JC2's flip (0x15A150) counts its frames (0x6D6190) and waits in 0x15B400(target, &late) until the
     // vblank handler's counter (0x6D61AC) reaches the frame count: it sets the wake flag (0x6D61A4) and sleeps
@@ -31,6 +32,7 @@ namespace jc2
 
     void frameWait(uint8_t *ram, R5900Context *ctx, Runtime *rt)
     {
+        debugFrameWait(ram, ctx, rt);
         drawFrameEnd();
         bozo::port::frameEnd(rt, ctx);
         notifyFrame();

@@ -35,7 +35,9 @@ add_custom_command(OUTPUT ${jc2_gen}/jc2.elf ${jc2_gen}/jc2.entries
 file(GLOB jc2_port_sources CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/runtime/jc2_*.cpp)
 add_custom_command(OUTPUT ${jc2_gen}/jc2_externals.txt
   COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/jc2_bozo_overrides.py ${CMAKE_SOURCE_DIR} ${jc2_gen}/jc2_overrides.txt
-  COMMAND bozo-externals ${jc2_gen}/jc2.elf ${jc2_gen}/jc2_externals.txt --overrides ${jc2_gen}/jc2_overrides.txt --symbols ${jc2_symbols}
+  COMMAND bozo-externals ${jc2_gen}/jc2.elf ${jc2_gen}/jc2_externals.new.txt --overrides ${jc2_gen}/jc2_overrides.txt --symbols ${jc2_symbols}
+  # Rewritten only when it changes: an edit to a runtime file that adds no override recompiles nothing (Ninja restat).
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different ${jc2_gen}/jc2_externals.new.txt ${jc2_gen}/jc2_externals.txt
   DEPENDS bozo-externals tools/jc2_bozo_overrides.py ${jc2_gen}/jc2.elf ${jc2_symbols} ${jc2_port_sources})
 
 set(jc2_chunks 32)
@@ -112,7 +114,7 @@ add_custom_command(OUTPUT ${jc2_mesh_pack}
   COMMENT "Converting JC2's 3D models into the mesh pack")
 add_custom_target(jc2_meshes_pack ALL DEPENDS ${jc2_mesh_pack})
 
-set(jc2_runtime runtime/jc2_main.cpp runtime/jc2_port.cpp runtime/jc2_audio.cpp runtime/jc2_draw.cpp runtime/jc2_2d.cpp runtime/jc2_meshes.cpp)
+set(jc2_runtime runtime/jc2_main.cpp runtime/jc2_port.cpp runtime/jc2_audio.cpp runtime/jc2_draw.cpp runtime/jc2_2d.cpp runtime/jc2_meshes.cpp runtime/jc2_debug.cpp)
 add_executable(jc2-headless ${jc2_runtime} $<TARGET_OBJECTS:jc2_audio_code>)
 target_include_directories(jc2-headless PRIVATE ${jc2_audio_gen})
 target_link_libraries(jc2-headless PRIVATE jc2_game jc2_overlays bozo_host)
