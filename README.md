@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/branding/jc2_banner.png" alt="Jade Cocoon 2, native PC port by The Bozos" width="100%">
+
 # JC2_Recomp
 
 **A native Windows and Linux port of *Jade Cocoon 2* (NTSC-U, `SLUS-20309`), made by statically recompiling the game's PlayStation 2 code to C++.**<br>
