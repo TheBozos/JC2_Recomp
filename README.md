@@ -5,11 +5,11 @@
 # JC2_Recomp
 
 **A native Windows and Linux port of *Jade Cocoon 2* (NTSC-U, `SLUS-20309`), made by statically recompiling the game's PlayStation 2 code to C++.**<br>
-Not an emulator: the game's own MIPS R5900 code, rebuilt as a native program on a reimplementation of the PS2 hardware.
+Not an emulator: the game's own MIPS R5900 code, rebuilt as a native program on [BozoEngine](https://github.com/TheBozos/BozoEngine), with no PS2 hardware at any level.
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-1b8cff)
 ![Compiler](https://img.shields.io/badge/compiler-GCC%20%7C%20Clang-1b8cff)
-![Based on](https://img.shields.io/badge/based%20on-PS2Recomp-17a35b)
+![Engine](https://img.shields.io/badge/engine-BozoEngine-17a35b)
 ![Status](https://img.shields.io/badge/status-bring--up-d01f3c)
 
 </div>
@@ -24,48 +24,25 @@ Not an emulator: the game's own MIPS R5900 code, rebuilt as a native program on 
 
 ## Status
 
-**Moving to BozoEngine (2026-11-15).** The port now builds on [BozoEngine](https://github.com/TheBozos/BozoEngine), The
-Bozos' own toolchain with no PS2 hardware at any level, in place of the PS2Recomp fork. In its window the intro movie
-(with its music), the title and the main menu are drawn natively from the game's own data; what follows the menu is
-being ported, one draw family at a time. The PS2Recomp notes below describe the previous build, kept until the
-BozoEngine one draws. Build: `cmake -S . -B build/bozo_game -G Ninja && cmake --build build/bozo_game` (the disc files in
-`game/`), then `build/bozo_game/jc2-headless --frames 600`.
-
-**Bring-up, not playable yet.** On the full native path (no paraLLEl-GS, no IOP interpreter) the game boots through
-the intro movies, the title screen and the main menu, and New game plays the opening movie and the first in-game scenes
-with their dialogue, then free control from the Jade Throne Room out to the Wormhole Forest. Windows comes first, then Linux.
+**Bring-up, not playable yet.** The port builds on [BozoEngine](https://github.com/TheBozos/BozoEngine), The Bozos' own
+toolchain: the game's calls are answered by native libraries and JC2's own port code, with no GIF packet, no GS state
+machine and no IOP in between. The intro movie (with its music), the title, the main menu, the first in-game scenes,
+the forests and the battles are drawn natively from the game's own data; the rest is being ported, one draw family at
+a time. Windows comes first, then Linux.
 
 | Milestone | |
 |---|:---:|
-| Map the stripped main ELF (Ghidra function map, data spans filtered out, SDK functions from the fork's signature database) | ✅ |
-| Recompile it and link the generated code with the PS2Recomp runtime (Windows) | ✅ |
-| Boot: EE kernel, CD reads from the disc files, the game's 13 IOP modules recompiled to native code | ✅ |
-| Code overlays: the 1368 CodeWarrior modules loaded at run time recompiled, static initializers included | ✅ |
+| Main ELF recompiled offline from the player's disc at build time | ✅ |
+| Code overlays: the 1,383 CodeWarrior modules loaded at run time, each compiled as an image of its own | ✅ |
+| Sound driver (the game's own IOP modules) compiled offline to native C++ over host services | ✅ |
 | Movies, title screen, main menu | ✅ |
-| Native GS renderer (OpenGL, no GS emulation) | ✅ |
-| Sound and music (SPU2 and IOP on the PC clock) | 🔧 |
-| New game: opening movie, first in-game scene and dialogue | ✅ |
-| Native frame loop: no vblank pacing, 60 fps on the PC clock | ✅ |
-| VU1 microcode compiled ahead of time (`ps2_vu_aot`): no VU interpreter in play | ✅ |
-| Field exploration: the Jade Throne Room, then out to the Wormhole Forest | ✅ |
-| First battle | ⏳ |
+| New game: opening movie, first scenes and dialogue, the Jade Throne Room, the forests | ✅ |
+| Battles drawn (stage, monsters, effects) | ✅ |
+| Animated IPU textures decoded natively | 🔧 |
+| Battles playable from the debug launcher | 🔧 |
 | Memory card saves | ⏳ |
 | Linux build | ⏳ |
 | Widescreen, higher internal resolution | ⏳ |
-
-**Native port** (no PS2 hardware emulation left, not even a small part: the shared goal of the fork's ports). Native
-means the game's draws built straight from its own data (vertices, matrices, materials), with no GIF packet, no GS
-state machine and no copy of GS memory in between.
-
-| Layer | |
-|---|:---:|
-| IOP modules (13) recompiled to C++, none interpreted | ✅ |
-| Sound and IOP on the PC's clock | 🔧 |
-| No paraLLEl-GS: OpenGL on the GPU | ✅ |
-| Frame loop on the PC's clock (60 fps, no vblank pacing) | ✅ |
-| VU1 microcode compiled ahead of time (`ps2_vu_aot`), no VU interpreter | ✅ |
-| VU1 programs translated to C++, drawn from the game's data instead of VU1 microcode | ⏳ |
-| Native draws from the game's data, no GIF packet and no GS front end | ⏳ |
 
 ✅ works · 🔧 in progress · ⏳ not reached yet
 
@@ -74,13 +51,13 @@ what remains open.
 
 ## Screenshots
 
-On BozoEngine (2026-11-16): the intro movie, the title and the main menu, drawn natively (no GS):
+The intro movie, the title and the main menu, drawn natively:
 
 | | |
 |---|---|
-| ![The title screen on BozoEngine](docs/screenshots/bozo-title.png) | ![The main menu on BozoEngine](docs/screenshots/bozo-main-menu.png) |
+| ![The title screen](docs/screenshots/bozo-title.png) | ![The main menu](docs/screenshots/bozo-main-menu.png) |
 
-On the previous PS2Recomp build, the first in-game scenes on the full native path (native GS renderer, native IOP modules, recompiled overlays), up to the Wormhole Forest:
+The first in-game scenes, from an earlier build, up to the Wormhole Forest:
 
 | | | |
 |---|---|---|
@@ -96,29 +73,20 @@ Accuracy first; once it is playable, widescreen and higher internal resolution.
 ## How it works
 
 ```
-disc files (game/) ──► Ghidra (headless, EE extension) + ExportPS2Functions ──► tools/filter_ghidra_map.py
-                   ──► recomp/ghidra/jc2_functions.csv ──► ps2_analyzer (SCE SDK signatures) ──► recomp/jc2_slus20309.toml
+disc files (game/) ──► tools/jc2_bozo_prepare.py (code spans, entry points; recomp/ghidra/jc2_functions.csv)
+                   ──► bozo-recomp ──► the main ELF as C++ (build/bozo_game/jc2_gen)
+   CDDATA.000 overlays ──► tools/jc2_bozo_overlays.py ──► bozo-recomp per module (1,383 modules)
+   the game's sound IRX ──► tools/jc2_bozo_audio.py ──► BozoEngine's native_irx ──► native C++
+   3D models ──► tools/jc2_mesh_pack.py ──► BozoEngine mesh pack
                                            │
-                     ps2_recomp ──► C++ (one file per function, generated/) · ps2_vu_aot ──► VU1 microcode (generated/vu1/)
-   CDDATA.000 overlays ──► tools/find_overlays.py ──► ps2_recomp in module mode ──► generated/overlays/ (1368 modules)
-   the game's IRX (dumped by a first run) ──► the fork's tools/iop_recomp.py ──► generated/iop/ (13 modules)
-                                           │
-                 CMakeLists.txt ──► PS2Recomp runtime + generated code + runtime/jc2_overrides.cpp
-                                           │
-   PS2Recomp runtime: EE kernel HLE · DMAC · GIF · native GS renderer (OpenGL) · VIF/VU0/VU1 · IPU ─┼─► ps2EntryRunner
-   PS2Recomp IOP:     the game's own IRX as native code · SPU2 and IOP on the PC clock · SIO2
+             CMakeLists.txt ──► BozoEngine + generated code + runtime/jc2_*.cpp ──► jc2 (window), jc2-headless
 ```
 
-- The retail executable is stripped, and its code and data share a single segment. Ghidra with the Emotion Engine
-  extension maps the functions; `tools/filter_ghidra_map.py` drops the entries Ghidra put on data, and `ps2_analyzer`
-  names the Sony SDK functions that have runtime handlers from the fork's signature database (244 at first pass).
-- PS2Recomp turns every function into C++ (72,000 functions) and emits the address-indexed function table.
-- The top-level `CMakeLists.txt` builds the fork's runtime, swaps its placeholder function table for the generated one
-  and links everything into `ps2EntryRunner`.
-- `runtime/jc2_overrides.cpp` holds the game-specific bindings.
-
-The PS2Recomp fork lives in `PS2Recomp/` (git submodule, [boubou666/PS2Recomp](https://github.com/boubou666/PS2Recomp)),
-shared with the *Twisted Metal: Black*, *The Third Age*, *Valkyrie Profile 2* and *Drakengard* recompilations.
+- The retail executable is stripped, and its code and data share a single segment. `recomp/ghidra/jc2_functions.csv`
+  is the function map (Ghidra with the Emotion Engine extension, entries on data dropped by
+  `tools/filter_ghidra_map.py`); `recomp/jc2_symbols.txt` names the functions BozoEngine's libraries answer.
+- Everything derived from the disc is produced at build time into `build/`, never committed.
+- `runtime/` holds JC2's port code: draws from the game's own data, the scene and battle debug tools, save states.
 
 ## Requirements
 
@@ -126,9 +94,7 @@ shared with the *Twisted Metal: Black*, *The Third Age*, *Valkyrie Profile 2* an
 - CMake 3.21+, Ninja, GCC 13+ or Clang with C++20
 - FFmpeg development libraries (`libavcodec`, `libavformat`, `libavutil`, `libswresample`, `libswscale`) and `pkg-config`
 - `bsdtar` (libarchive) to extract the disc, Python 3
-- To regenerate the function map: [Ghidra](https://ghidra-sre.org/) 12 with the
-  [Emotion Engine extension](https://github.com/chaoticgd/ghidra-emotionengine-reloaded) and a JDK 21
-- A CPU with AVX2 (the runtime is built for `x86-64-v3`)
+- A CPU with AVX2
 - Your own copy of `SLUS-20309` (check the hash above)
 
 ## Build and run
@@ -137,28 +103,22 @@ shared with the *Twisted Metal: Black*, *The Third Age*, *Valkyrie Profile 2* an
 git clone --recurse-submodules https://github.com/TheBozos/JC2_Recomp.git
 cd JC2_Recomp
 scripts/extract_iso.sh "/path/to/Jade Cocoon 2 (USA).iso"   # disc files -> game/
-scripts/build_tools.sh                                       # ps2_recomp, ps2_analyzer, ps2_vu_aot -> build/tools
-GHIDRA_INSTALL_DIR=/path/to/ghidra scripts/ghidra.sh         # only to regenerate recomp/ghidra/jc2_functions.csv
-scripts/recomp.sh                                            # ELF + recomp/jc2_slus20309.toml -> generated/
-scripts/overlays.sh                                          # code overlays in CDDATA.000 -> generated/overlays/
-scripts/build_runtime.sh                                     # runtime + generated code -> build/game
-PS2X_IOP_NATIVE=0 PS2X_IOP_DUMP_MODULES=build/iop_modules scripts/run.sh   # once: saves the game's IOP modules
-scripts/iop_recomp.sh && scripts/build_runtime.sh            # IOP modules -> generated/iop/, rebuild
-scripts/run.sh                                               # ps2EntryRunner game/SLUS_203.09
+cmake -S . -B build/bozo_game -G Ninja -DJC2_WINDOW=ON
+cmake --build build/bozo_game -j 4
+build/bozo_game/jc2                                          # the game window
+build/bozo_game/jc2-headless --frames 600                    # no window (checks, scripted runs)
 ```
+
+`--help` lists the options: save states (`--load-state`, `--save-state`), teleport (`--scene N`), the battle launcher
+(`--battle N`), hidden-window captures (`--hidden`, silent too) and `--mute`.
 
 ### Windows
 
-The same scripts run in an MSYS2 **UCRT64** shell, with MSYS2's GCC (MSVC is not supported for this port).
+Build in an MSYS2 **UCRT64** shell, with MSYS2's GCC (MSVC is not supported for this port).
 
 ```bash
 pacman -S --needed mingw-w64-ucrt-x86_64-{gcc,cmake,ninja,pkgconf,ffmpeg,libarchive,python} git
 ```
-
-`scripts/stage_dlls.sh` copies the DLLs the runner needs next to `ps2EntryRunner.exe`, so it can also be started
-outside the MSYS2 shell. A full runner build takes about 16 minutes on 16 threads.
-
-`scripts/analyze.sh` regenerates the TOML from scratch; it discards manual edits, so diff before committing.
 
 ## Disc facts
 
@@ -174,32 +134,31 @@ outside the MSYS2 shell. A full runner build takes about 16 minutes on 16 thread
 
 ## Sharing the machine with other ports
 
-Several PS2Recomp ports are developed on the same machine. A timed game run or benchmark takes the shared bench lock
-(the fork's `PS2Recomp/tools/bench_lock.sh`, file `D:/ps2recomp_bench.lock`) first, so that another port's build or
-game does not skew it:
+Several ports are developed on the same machine. A timed game run, benchmark or heavy build takes the shared bench
+lock (BozoEngine's `tools/bench_lock.sh`, file `D:/ps2recomp_bench.lock`) first, so that another port's build or game
+does not skew it:
 
 ```bash
-scripts/bench_run.sh 5 "boot timing" scripts/run.sh   # waits for the lock, takes it, runs, releases it on any exit
+scripts/bench_run.sh 5 "boot timing" build/bozo_game/jc2-headless --frames 600   # one slot
+scripts/bench_run.sh --alone 60 "JC2 build" cmake --build build/bozo_game -j 4      # the bench alone
 ```
-
-Heavy builds take no lock, but do not start while someone holds it.
 
 ## Repository layout
 
 | Path | Contents |
 |---|---|
-| `recomp/` | Recompiler config (analyzer output plus manual additions) and the Ghidra function map |
-| `runtime/` | Game override module (game-specific bindings) |
-| `scripts/` | Extract, build tools, Ghidra, analyze, recomp, build runner, run, bench lock |
-| `tools/` | `filter_ghidra_map.py` (drops map entries in data), `sync_tree.py` (fast sync of generated code), `find_code_pointers.py` (entry points reached only through pointers) |
-| `docs/` | Bring-up notes |
-| `PS2Recomp/` | PS2Recomp fork (submodule) |
+| `recomp/` | The Ghidra function map and the symbol names |
+| `runtime/` | JC2's port code (draws, debug tools, save states, the game window's entry point) |
+| `scripts/` | Disc extraction, the bench lock wrapper |
+| `tools/` | Build-time converters (`jc2_bozo_*.py`, `jc2_mesh_pack.py`) and analysis helpers |
+| `docs/` | Bring-up notes, branding |
+| `BozoEngine/` | The engine (submodule) |
 
 Everything derived from the game (`game/`, `generated/`, `build/`, disc images, captures) is git-ignored. Never commit or
 redistribute it.
 
 ## Credits
 
-- [PS2Recomp](https://github.com/ran-j/PS2Recomp) by ran-j and contributors (GPL), the recompiler and runtime this port is built on.
-- The *Twisted Metal: Black*, *The Third Age*, *Valkyrie Profile 2: Silmeria* and *Drakengard* recompilations, developed on the same PS2Recomp fork; runtime fixes are shared.
+- [BozoEngine](https://github.com/TheBozos/BozoEngine) by The Bozos, the engine this port is built on.
+- The *Twisted Metal: Black*, *The Third Age*, *Valkyrie Profile 2: Silmeria* and *Drakengard* ports, developed on the same engine; fixes are shared.
 - *Jade Cocoon 2* © Genki, published by Ubisoft in North America. This is an unofficial fan project, not affiliated with or endorsed by them.

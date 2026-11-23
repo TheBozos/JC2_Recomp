@@ -16,12 +16,12 @@ SLUS_*
 *.irx
 *.IMG
 
-# PS2Recomp is a git submodule; local build trees live here
+# Local build trees
 build/
 out/
 cmake-build-*/
 
-# Generated recompiled C++ (derived from the game binary; regenerate with scripts/recomp.sh)
+# Generated recompiled C++ from earlier builds (derived from the game binary)
 generated/
 
 # Editor / OS noise

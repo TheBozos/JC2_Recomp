@@ -26,14 +26,14 @@ from the player's own files in `game/`, into `build/`:
    `tools/native_irx`): `LIBSD`, `MODMIDI`, `MODHSYN`, `UAMAN`, `IMODEMAN`, `M2IOPSYS`, `M2SOUND`, `M2IMODE`.
 5. `jc2-headless` (no window yet): `cmake -S . -B build/bozo_game -G Ninja && cmake --build build/bozo_game`.
 
-The PS2Recomp pipeline below (`extract_iso.sh` → `build_tools.sh` → `ghidra.sh` → `analyze.sh` → `recomp.sh` →
-`build_runtime.sh` → `run.sh`) is the old one, kept until the BozoEngine build draws.
+The log's first weeks describe the earlier build, on an outside recompiler and its runtime; that build and its
+scripts were removed from the repository on 2026-11-23.
 
 ## Log
 
 ### Day 0 (2026-10-27)
 
-- Fork at `boubou666/PS2Recomp@c0b08a0`; it already has `58b5c8b`, `02398e0`, `9dc213a`, `ebc558a` and `281f7d9`.
+- The earlier recompiler at `c0b08a0`; it already has `58b5c8b`, `02398e0`, `9dc213a`, `ebc558a` and `281f7d9`.
 - `ps2_analyzer`: 244 SDK functions to stub, 324 recognised without a runtime handler, 40 jump tables.
 - Ghidra headless: 72,636 entries. The first recompile had 69,751 unhandled instructions, all in data
   (0x500000 and up) that shares the code's segment. `tools/filter_ghidra_map.py` drops the entries in the data spans
@@ -139,7 +139,7 @@ The PS2Recomp pipeline below (`extract_iso.sh` → `build_tools.sh` → `ghidra.
 - Known main regression (room, 2026-10-27): merge `6dd26a0` (`sctpt2/ipu-in-dma`) gives VP2S a black screen; fix on
   `sctpt2/ipu-release`. JC2's local integration tree is on `6dd26a0`: a frozen screen around movies points here first.
 - Room regression harness (sc3-port, `tools/port_regress.sh` on `tools/port-regress`): each port provides
-  `scripts/regress.sh <build-dir> <out-dir>` writing `<out-dir>/summary.txt` (key=value: port, ps2recomp, route_reached,
+  `scripts/regress.sh <build-dir> <out-dir>` writing `<out-dir>/summary.txt` (key=value: port, recompiler, route_reached,
   exit ok|hang|crash|timeout, duration_s, frames_presented, fps_mean, fps_p10, frames_over_25ms,
   gs_frames_per_5s_median/min, spu2_underruns, error_lines, warning_lines; NA when unknown), `last_frame.png` and
   `run.log`. To add for JC2 once it reaches a scripted scene.
@@ -363,7 +363,7 @@ Advice asked of TTA and VP2S (both answered): boot headless first, zero unknown 
 sound, then draws one family at a time; dump EE RAM at the failing boundary (`--dump-ram`).
 
 - **Symbol map** (`recomp/jc2_symbols.txt`): `bozo_symbolmap.py match` against DC's and TMB's unstripped
-  executables names 663 functions by evidence; 45 more are reviewed (`recomp/jc2_symbols_reviewed.txt`): the PS2Recomp
+  executables names 663 functions by evidence; 45 more are reviewed (`recomp/jc2_symbols_reviewed.txt`): the earlier
   analyzer's names the game ran under for weeks, plus ones read here. TTA's warning held: `sceMcMkdir` (0x125748) is
   `sceMcOpen(..., 0x40)`; named as mkdir. `InitAlarm` (0x11AB90) installs the old SDK's alarm patch (syscall 116):
   named, BozoEngine answers it; `SetAlarm`/`iSetAlarm` are syscalls 0xFC/0xFD at 0x119C60/0x119C70.
@@ -483,7 +483,7 @@ yet: the menu's labels (another routine), rotation (+0x2C), mip shift (+0x1C).
 
 - **Overlays**: `tools/jc2_bozo_overlays.py` extracts the 1,383 MWo3 modules from CDDATA.000 (`find_overlays.py`), wraps
   each as an ELF (`wrap_overlay.py`), maps its functions (`overlay_functions.py`) and compiles it with bozo-recomp as an
-  image of its own: all 1,383, 0 untranslated instructions (the 15 `SC_*` that PS2Recomp could not take included). They
+  image of its own: all 1,383, 0 untranslated instructions (the 15 `SC_*` that the earlier recompiler could not take included). They
   build in 32 batches (each module in its own namespace) and `jc2_main.cpp` registers them with
   `FunctionTable::addModule` by their 64-byte header. BozoEngine: `moduleAt` got a span check and a last-module cache.
 - **New game**: the opening movie (not skippable) plays natively; the picture thread's slot wait spins on a yield

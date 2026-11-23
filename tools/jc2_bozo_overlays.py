@@ -3,7 +3,7 @@
 JC2 loads CodeWarrior 'MWo3' modules from CDDATA.000 into fixed slots (0x940000, 0x963000, ...) and calls into them.
 Each module is compiled ahead of time as an image of its own (bozo-recomp --prefix ovl_<name>), and the runtime calls
 a module's code only while the 64 bytes at its load address are its header (FunctionTable::addModule: its identity).
-Stages per module, as the PS2Recomp build did them: tools/find_overlays.py (once: every module as the game loads it),
+Stages per module: tools/find_overlays.py (once: every module as the game loads it),
 tools/wrap_overlay.py (an ELF at the load address; VP2S_Recomp's wrap_elf.py, JC2_WRAP_ELF), tools/overlay_functions.py
 (the function map, without Ghidra), then bozo-recomp with the map as explicit entries.
 
