@@ -47,11 +47,15 @@ namespace jc2
         constexpr int kOpponentCount = 151;
         constexpr uint32_t kBattleSetup = 0x008963ECu;
         constexpr uint32_t kBattleKind = 0x0089B071u;
+        constexpr uint32_t kGroups = 0x005857D0u; // battle groups: +0 the battle script's name ("e..."), the slots
+        constexpr int kGroupCount = 2000;
+        constexpr uint32_t kEnemyGroup = 0x0089B028u; // the enemies the battle reads (an event battle: 0x5857D0 + 0x30 id)
         constexpr int kModeTitle = 0, kModeGame = 2, kModeBattle = 3;
 
         const uint8_t *g_ram = nullptr;
         std::atomic<int> g_battle{-1}; // the opponent to fight from the next frame wait
         std::atomic<uint64_t> g_battleAt{0};
+        std::atomic<bool> g_battleGroup{false}; // g_battle is a battle group (0x5857D0 + 0x30 n), not a hunter
         std::atomic<uint64_t> g_frame{0};
         std::atomic<int> g_request{-1};   // the scene to ask for at the next frame's end
         std::atomic<uint64_t> g_requestAt{0}; // not before this frame
@@ -97,36 +101,66 @@ namespace jc2
         return name;
     }
 
-    void requestBattle(int opponent, uint64_t atFrame)
+    void requestBattle(int opponent, uint64_t atFrame, bool group)
     {
         g_battleAt = atFrame;
+        g_battleGroup = group;
         g_battle = opponent;
     }
 
-    // In the frame wait (the main thread, before the frame ends): a battle asked for starts as an event starts one.
-    // Only in mode 2 (a forest or an event scene) with no mode change pending.
-    void debugFrameWait(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+    // A battle group's script name without its "e" (a group's +0 names the battle's script: "esAsg_Battle_Tutorial3").
+    std::string groupName(int group)
+    {
+        if (!g_ram || group < 0 || group >= kGroupCount)
+            return {};
+        const uint32_t name = r32(g_ram, kGroups + 0x30u * uint32_t(group));
+        if (name < 0x100000u || name >= 0x2000000u)
+            return {};
+        const char *s = reinterpret_cast<const char *>(g_ram + name);
+        std::string text(s, strnlen(s, 48));
+        for (char c : text)
+            if (c < 32 || c > 126)
+                return {};
+        return text.size() > 1 && text[0] == 'e' ? text.substr(1) : text;
+    }
+
+    // The frame wait: nothing any more (battles start from the scene's step, below).
+    void debugFrameWait(uint8_t *, R5900Context *, Runtime *) {}
+
+    // A battle asked for, as an event script's battle command starts one (0x1EC2C4): it fills the battle state block
+    // (0x89B070: -1, the kind, 0 (h); +8 0, +0xC the kind's flags (bit 0 for kind 3, the command's table at 0x6943B0),
+    // +0x10 -1) and the enemies the battle reads (0x89B028: a party, as a group of the table 0x5857D0 or a hunter's
+    // record +0x30), and the scene's step returns mode 3. The scene's exit (0x1E7500, mode 3) then prepares the battle
+    // and puts 0x1E6520 in charge of it and of the way back. Taken only while the scene's script runs (scene +6 = 1).
+    bool startBattle(uint8_t *ram, uint32_t scene)
     {
         const int opponent = g_battle.load();
-        if (opponent < 0 || g_frame.load() < g_battleAt.load())
-            return;
+        if (opponent < 0 || g_frame.load() < g_battleAt.load() || r16(ram, scene + 6) != 1)
+            return false;
         const uint32_t s = modeBytes(ram);
         if (!s || ram[s] != kModeGame || ram[s + 1] != 0xFF)
-            return; // the title, a battle, a menu, a mode change pending: wait
+            return false; // a mode change pending: wait
         g_battle = -1;
-        w32(ram, kBattleSetup + 8, kOpponents + 0x94u * uint32_t(opponent) + 0x30u);
+        const bool group = g_battleGroup.load();
+        const uint32_t party = group ? kGroups + 0x30u * uint32_t(opponent) : kOpponents + 0x94u * uint32_t(opponent) + 0x30u;
+        ram[kBattleKind - 1] = 0xFF;
+        ram[kBattleKind] = 3;
+        ram[kBattleKind + 1] = ram[kBattleKind + 2] = 0;
+        w32(ram, kEnemyGroup, party);
+        w32(ram, kBattleKind - 1 + 8, 0);
+        w32(ram, kBattleKind - 1 + 0xC, 1);
+        w32(ram, kBattleKind - 1 + 0x10, 0xFFFFFFFFu);
+        // The forest hunter encounter's setup too (0x221B14): the party, -1, 0, 0.
+        w32(ram, kBattleSetup + 8, party);
         w32(ram, kBattleSetup + 4, 0xFFFFFFFFu);
         ram[kBattleSetup + 0x38] = 0;
         w32(ram, kBattleSetup + 0x3C, 0);
-        ram[kBattleKind] = 3;
-        R5900Context call = *ctx; // the game's own step, on the waiting thread's stack below its frame
-        call.r[31].uw[0] = ctx->pc;
-        jc2_func_0x430e10(ram, &call, rt);
-        ram[s + 1] = kModeBattle;
-        const std::string message = "Battle: against " + std::to_string(opponent) + " " + opponentName(opponent);
+        const std::string message = group ? "Battle: group " + std::to_string(opponent) + " " + groupName(opponent)
+                                          : "Battle: against " + std::to_string(opponent) + " " + opponentName(opponent);
         std::printf("[jc2:debug] frame %llu: %s\n", (unsigned long long)g_frame.load(), message.c_str());
         if (g_message)
             g_message(message);
+        return true;
     }
 
     // The scene's name as the game's table gives it ("A014"); "?" before the game is in memory.
@@ -186,7 +220,10 @@ namespace jc2
             if (g_message)
                 g_message(message);
         }
+        const bool battle = scene >= 0x100000u && scene < 0x2000000u - 8 && startBattle(ram, scene);
         rt->functions.generated(kSceneStep)(ram, ctx, rt);
+        if (battle)
+            ctx->r[2].ud[0] = kModeBattle; // the scene leaves into a battle
     }
 
     void installDebugOverrides(bozo::port::Registry &r)
@@ -254,7 +291,7 @@ namespace jc2
                                                           : mode == kModeTitle ? " (title)" : "");
             static int selected = 19;
             if (ImGui::Button("Fight"))
-                requestBattle(selected, 0);
+                requestBattle(selected, 0, false);
             ImGui::SameLine();
             ImGui::TextDisabled("%d %s", selected, opponentName(selected).c_str());
             if (g_battle >= 0)
@@ -270,11 +307,12 @@ namespace jc2
                     if (ImGui::Selectable(label.c_str(), selected == i))
                         selected = i;
                     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
-                        requestBattle(i, 0);
+                        requestBattle(i, 0, false);
                 }
                 ImGui::EndListBox();
             }
-            ImGui::TextDisabled("Starts as an event starts a hunter battle; it ends back where it started.");
+            ImGui::TextDisabled("Experimental: the battle starts, but without the battle script behind it the enemies\n"
+                                "are defaults and it waits. For a real battle: the Arena (scene 50, menu Arena).");
         });
 #endif
     }

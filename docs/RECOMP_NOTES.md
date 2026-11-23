@@ -635,3 +635,13 @@ Mapped from SLUS_203.09 (`runtime/jc2_debug.cpp`), for testing without playing u
   bank record with the same TEX0, place and size. JC2 prints "[jc2:fx] textured effect without a texture" with the
   banks when one is still missing.
 - Open: one static mesh near resource 1595 (0x1B9DDB0) once in the lesson, not found.
+- **`--battle` (2026-11-23, not finished)**: an event script starts a battle with command 0x1C of the executor
+  0x1EB5D0 (third argument 1: the battle case at 0x1EC280; the kind, 0x89B071, from its fifth: 7 for the Arena lesson;
+  the group from its fourth, `0x1A4CC0(n)` = 0x5857D0 + 0x30 n, 2000 groups, +0 the battle script's name such as
+  "esAsg_Battle_Tutorial3"; the hunters' records +0x30 have the same layout, "eM2ARENA_BATTLE_LV2_1" for Garon). The
+  scene then leaves with mode 3: the exit (0x1E7500) prepares the battle and installs 0x1E6520 for it and the way
+  back. The launcher now does that from the scene step's override (step returns 3, the battle block filled; the intro
+  camera plays), but the battle state 0x89B010-0x89B030 is the running script's context (copied from scene +0x10..+0x28
+  by 0x1E5100, reset to "no script" by 0x1E51B0 from the battle handler): with no script behind it, the group is
+  cleared, the battle shows four default bugs and waits for ever. To finish: start a real battle script (the group's
+  name) rather than fill the block. Until then the Arena lesson (s26200_arena_lesson) is the battle to test with.

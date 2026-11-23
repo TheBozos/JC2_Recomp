@@ -44,7 +44,7 @@ namespace jc2
     void installDebug(uint8_t *ram, std::function<void(const std::string &)> message);
     void requestScene(int scene, uint64_t atFrame);
     void installDebugOverrides(bozo::port::Registry &);
-    void requestBattle(int opponent, uint64_t atFrame);
+    void requestBattle(int opponent, uint64_t atFrame, bool group);
     void debugFrame(uint8_t *ram, uint64_t frame);
     // Save states: JC2's part (jc2_port.cpp, jc2_audio.cpp, jc2_meshes.cpp, jc2_2d.cpp).
     void portState(bozo::state::Archive &, Runtime &);
@@ -78,6 +78,7 @@ static int run(int argc, char **argv)
     uint64_t sceneAt = 0;
     int battle = -1;         // --battle: fight this opponent (jc2_debug.cpp), at --battle-at's frame
     uint64_t battleAt = 0;
+    bool battleGroup = false; // --battle-group: N is a battle group (the game's 2000), not a hunter
     std::string dumpRam; // EE RAM at the end of the run (a fault, the frame limit): the boundary to analyse offline
     for (int i = 1; i < argc; ++i)
     {
@@ -114,6 +115,8 @@ static int run(int argc, char **argv)
             sceneAt = std::stoull(argv[++i]);
         else if (a == "--battle" && i + 1 < argc)
             battle = std::stoi(argv[++i]);
+        else if (a == "--battle-group" && i + 1 < argc)
+            battle = std::stoi(argv[++i]), battleGroup = true;
         else if (a == "--battle-at" && i + 1 < argc)
             battleAt = std::stoull(argv[++i]);
         else if (a == "--headless")
@@ -135,7 +138,7 @@ static int run(int argc, char **argv)
             std::fprintf(stderr, "Usage: jc2-headless [--frames N] [--pad-script FILE] [--card-dir DIR] [--elf FILE]\n"
                                  "                    [--iso FILE] [--out FILE] [--dump-ram FILE] [--profile-io]\n"
                                  "                    [--load-state FILE [--load-state-at FRAME]] [--save-state FILE --save-state-at FRAME]\n"
-                                 "                    [--scene N [--scene-at FRAME]] [--battle N [--battle-at FRAME]]\n");
+                                 "                    [--scene N [--scene-at FRAME]] [--battle N | --battle-group N [--battle-at FRAME]]\n");
             return a == "--help" ? 0 : 2;
         }
     }
@@ -196,7 +199,7 @@ static int run(int argc, char **argv)
     if (scene >= 0)
         jc2::requestScene(scene, sceneAt);
     if (battle >= 0)
-        jc2::requestBattle(battle, battleAt);
+        jc2::requestBattle(battle, battleAt, battleGroup);
     bozo::audio::WavWriter recording;
     if (!wav.empty() && !recording.open(wav))
     {
