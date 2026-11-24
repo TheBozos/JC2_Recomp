@@ -16,6 +16,7 @@
 //   (+0 flags, +0x10 colour, +0x30 PRIM, +0x38 ALPHA, +0x48 TEST) and, for characters, the actor's bone palettes
 //   (actor +0x1E0 set A, +0x1E4 set B, picked by the frame's parity *0x6CC670 & 1; 0x80 bytes a bone, already in
 //   world space). Screen: P V W gives the GS's field coordinates (640 x 224 around 2048); the frame is 448 high.
+#include "bozo/libs/libraries.h"
 #include "bozo/port.h"
 #include "bozo/render/mesh_draw.h"
 #include "bozo/render/mesh_pack.h"
@@ -1545,6 +1546,436 @@ namespace jc2
             return texture;
         }
 
+        // ---- GS uploads: what the game sent where ----
+        // The game starts VIF1 and GIF transfers itself (its packet lists, 0x13E0D8 / 0x13E1D4, and others), which
+        // BozoEngine's I/O library completes at once: no DMA, no GIF. Their image transfers (BITBLTBUF, TRXPOS, TRXREG
+        // by A+D, then IMAGE data, in a GIF chain or VIF1's DIRECT) say which RAM went to which GS page: noted as the
+        // channel starts, an effect's texture record (not in the banks) is decoded from that RAM as the TIM2 pictures
+        // are (no GS memory: the transfers' sources, read where they are). JC2_TRACE_UPLOADS=1 lists them.
+        struct Upload
+        {
+            uint32_t dbp = 0, dbw = 0, psm = 0, x = 0, y = 0, w = 0, h = 0;
+            std::vector<std::pair<uint32_t, uint32_t>> spans; // (RAM address, bytes) of the pixels, in order
+            uint64_t serial = 0;
+        };
+        std::vector<Upload> g_uploads; // oldest first
+        uint64_t g_uploadSerial = 0;
+        const bool traceUploads = std::getenv("JC2_TRACE_UPLOADS") != nullptr;
+
+        uint32_t bitsPerPixel(uint32_t psm)
+        {
+            switch (psm)
+            {
+            case 0x00: return 32; // CT32
+            case 0x01: return 24; // CT24
+            case 0x02: case 0x0A: return 16; // CT16, CT16S
+            case 0x13: return 8;
+            case 0x14: return 4;
+            default: return 0;
+            }
+        }
+
+        void noteUpload(Upload u)
+        {
+            if (!u.w || !u.h || !bitsPerPixel(u.psm))
+                return;
+            u.serial = ++g_uploadSerial;
+            // The same place again replaces it; the list keeps the latest 2048.
+            for (auto it = g_uploads.begin(); it != g_uploads.end(); ++it)
+                if (it->dbp == u.dbp && it->psm == u.psm && it->x == u.x && it->y == u.y && it->w == u.w && it->h == u.h)
+                {
+                    g_uploads.erase(it);
+                    break;
+                }
+            if (traceUploads && g_uploadSerial <= 200)
+                std::fprintf(stderr, "[jc2:upload] page %#x width %u psm %#x at %u,%u %u x %u from %#x\n", u.dbp, u.dbw,
+                             u.psm, u.x, u.y, u.w, u.h, u.spans.empty() ? 0u : u.spans[0].first);
+            g_uploads.push_back(std::move(u));
+            if (g_uploads.size() > 2048u)
+                g_uploads.erase(g_uploads.begin());
+        }
+
+        // A GIF stream: A+D registers set the transfer, IMAGE data carries its pixels.
+        struct GifReader
+        {
+            uint64_t qwords = 0;
+            uint32_t vifStop = 0;
+            uint64_t bitbltbuf = 0, trxpos = 0, trxreg = 0;
+            uint32_t left = 0, nreg = 0, flg = 0, reg = 0;
+            uint64_t regs = 0;
+            Upload pending;
+            uint64_t pendingBytes = 0, wantBytes = 0;
+
+            void startImage()
+            {
+                pending = Upload{};
+                pending.dbp = uint32_t(bitbltbuf >> 32) & 0x3FFFu, pending.dbw = uint32_t(bitbltbuf >> 48) & 0x3Fu;
+                pending.psm = uint32_t(bitbltbuf >> 56) & 0x3Fu;
+                pending.x = uint32_t(trxpos >> 32) & 0x7FFu, pending.y = uint32_t(trxpos >> 48) & 0x7FFu;
+                pending.w = uint32_t(trxreg) & 0xFFFu, pending.h = uint32_t(trxreg >> 32) & 0xFFFu;
+                pendingBytes = 0;
+                wantBytes = uint64_t(pending.w) * pending.h * bitsPerPixel(pending.psm) / 8u;
+            }
+            // One qword of the stream, read at `address`.
+            void qword(const uint8_t *ram, uint32_t address)
+            {
+                ++qwords;
+                uint64_t lo, hi;
+                std::memcpy(&lo, at(ram, address), 8);
+                std::memcpy(&hi, at(ram, address + 8), 8);
+                if (!left)
+                {
+                    left = uint32_t(lo & 0x7FFFu), flg = uint32_t(lo >> 58) & 3u, nreg = uint32_t(lo >> 60) & 15u;
+                    if (!nreg)
+                        nreg = 16;
+                    regs = hi, reg = 0;
+                    if (flg == 0 || flg == 1)
+                        left *= flg == 0 ? nreg : (nreg + 1) / 2;
+                    if (flg >= 2 && left && !wantBytes)
+                        startImage();
+                    return;
+                }
+                --left;
+                if (flg == 0)
+                {
+                    const uint32_t r = uint32_t(regs >> (4 * reg)) & 15u;
+                    reg = (reg + 1) % nreg;
+                    if (r == 0xEu)
+                    {
+                        const uint32_t target = uint32_t(hi) & 0xFFu;
+                        if (target == 0x50u)
+                            bitbltbuf = lo;
+                        else if (target == 0x51u)
+                            trxpos = lo;
+                        else if (target == 0x52u)
+                            trxreg = lo;
+                        else if (target == 0x53u && (lo & 3u) == 0u)
+                            wantBytes = 0; // TRXDIR host to local: the IMAGE data that follows
+                    }
+                }
+                else if (flg >= 2 && wantBytes)
+                {
+                    if (!pending.spans.empty() && pending.spans.back().first + pending.spans.back().second == address)
+                        pending.spans.back().second += 16;
+                    else
+                        pending.spans.push_back({address, 16u});
+                    pendingBytes += 16;
+                    if (pendingBytes >= wantBytes)
+                    {
+                        noteUpload(std::move(pending));
+                        pending = Upload{};
+                        wantBytes = 0;
+                    }
+                }
+            }
+        };
+
+        // The data of a source chain (DMA tags: refe, cnt, next, ref, refs, call, ret, end) in order, as (address,
+        // bytes); with TTE (VIF channels) each tag's qword comes first, its lower half as padding (kPadding).
+        constexpr uint32_t kPadding = 0xFFFFFFF0u;
+        void chainSegments(const uint8_t *ram, uint32_t tag, bool tte, std::vector<std::pair<uint32_t, uint32_t>> &out)
+        {
+            uint32_t stack[2] = {0, 0}, depth = 0;
+            for (int n = 0; n < 65536 && tag; ++n)
+            {
+                const uint32_t t = tag & ~15u;
+                if (((t >> 28) != 7u) && (t < 0x1000u || t + 16u > 0x2000000u))
+                    return;
+                uint64_t word;
+                std::memcpy(&word, at(ram, t), 8);
+                const uint32_t qwc = uint32_t(word) & 0xFFFFu, id = uint32_t(word >> 28) & 7u;
+                const uint32_t addr = uint32_t(word >> 32) & 0x7FFFFFF0u, spr = uint32_t(word >> 63);
+                const uint32_t dataAddr = spr ? (0x70000000u | (addr & 0x3FF0u)) : addr;
+                if (tte)
+                {
+                    // The tag's whole qword reaches VIF1, which ignores its lower half: kept as padding so that DIRECT's
+                    // data after it stays on a qword boundary.
+                    out.push_back({kPadding, 8u});
+                    out.push_back({t + 8, 8u});
+                }
+                switch (id)
+                {
+                case 0: // refe
+                    out.push_back({dataAddr, qwc * 16u});
+                    return;
+                case 1: // cnt
+                    out.push_back({t + 16, qwc * 16u});
+                    tag = t + 16 + qwc * 16u;
+                    break;
+                case 2: // next
+                    out.push_back({t + 16, qwc * 16u});
+                    tag = addr;
+                    break;
+                case 3: // ref
+                case 4: // refs
+                    out.push_back({dataAddr, qwc * 16u});
+                    tag = t + 16;
+                    break;
+                case 5: // call
+                    out.push_back({t + 16, qwc * 16u});
+                    if (depth >= 2)
+                        return;
+                    stack[depth++] = t + 16 + qwc * 16u;
+                    tag = addr;
+                    break;
+                case 6: // ret
+                    out.push_back({t + 16, qwc * 16u});
+                    if (!depth)
+                        return;
+                    tag = stack[--depth];
+                    break;
+                default: // end
+                    out.push_back({t + 16, qwc * 16u});
+                    return;
+                }
+            }
+        }
+
+        // A stream of segments read by words, with each word's address.
+        struct Stream
+        {
+            const std::vector<std::pair<uint32_t, uint32_t>> &segs;
+            size_t seg = 0;
+            uint32_t offset = 0;
+            uint64_t position = 0; // bytes read so far
+            bool more() const { return seg < segs.size(); }
+            uint32_t address() const { return segs[seg].first + offset; }
+            void skip(uint32_t bytes)
+            {
+                while (bytes && more())
+                {
+                    const uint32_t take = std::min(bytes, segs[seg].second - offset);
+                    offset += take, bytes -= take, position += take;
+                    if (offset >= segs[seg].second)
+                        ++seg, offset = 0;
+                }
+                while (more() && offset >= segs[seg].second)
+                    ++seg, offset = 0;
+            }
+            void align(uint32_t to)
+            {
+                if (position % to)
+                    skip(uint32_t(to - position % to));
+            }
+        };
+
+        // VIF1's codes: DIRECT / DIRECTHL carry GIF data; the others' sizes are skipped.
+        void readVif(const uint8_t *ram, const std::vector<std::pair<uint32_t, uint32_t>> &segs, GifReader &gif)
+        {
+            Stream s{segs};
+            s.skip(0);
+            for (int n = 0; n < 1 << 22 && s.more(); ++n)
+            {
+                if (s.segs[s.seg].first == kPadding || s.segs[s.seg].second - s.offset < 4u)
+                {
+                    s.skip(s.segs[s.seg].second - s.offset);
+                    continue;
+                }
+                uint32_t code;
+                std::memcpy(&code, at(ram, s.address()), 4);
+                s.skip(4);
+                const uint32_t cmd = (code >> 24) & 0x7Fu, imm = code & 0xFFFFu, num = (code >> 16) & 0xFFu;
+                if (cmd == 0x50u || cmd == 0x51u)
+                {
+                    s.align(16);
+                    const uint32_t qwords = imm ? imm : 65536u;
+                    for (uint32_t q = 0; q < qwords && s.more(); ++q)
+                    {
+                        if (s.segs[s.seg].second - s.offset >= 16u)
+                            gif.qword(ram, s.address());
+                        s.skip(16);
+                    }
+                }
+                else if (cmd == 0x4Au)
+                {
+                    s.align(8);
+                    s.skip((num ? num : 256u) * 8u);
+                }
+                else if (cmd >= 0x60u)
+                {
+                    const uint32_t vl = cmd & 3u, vn = (cmd >> 2) & 3u, elements = num ? num : 256u;
+                    const uint32_t bits = (32u >> vl) * (vn + 1u) * elements;
+                    s.skip((bits + 31u) / 32u * 4u);
+                }
+                else if (cmd == 0x20u)
+                    s.skip(4);
+                else if (cmd == 0x30u || cmd == 0x31u)
+                    s.skip(16);
+                else if (cmd > 0x17u)
+                {
+                    gif.vifStop = code ? code : 1u;
+                    return; // not a VIF code: stop rather than misread
+                }
+            }
+        }
+
+        void observeSend(const uint8_t *ram, bool vif1, uint32_t data, uint32_t qwc, bool chain, bool tte)
+        {
+            std::vector<std::pair<uint32_t, uint32_t>> segs;
+            if (chain)
+                chainSegments(ram, data, tte, segs);
+            else
+                segs.push_back({data & ~15u, qwc * 16u});
+            GifReader reader;
+            if (vif1)
+                readVif(ram, segs, reader);
+            static int traced = 0;
+            if (traceUploads && traced < 40)
+            {
+                ++traced;
+                uint64_t bytes = 0;
+                for (const auto &sg : segs)
+                    bytes += sg.second;
+                std::fprintf(stderr, "[jc2:upload] %s %s from %#x: %zu segments, %llu bytes, %llu GIF qwords, VIF stop %#x\n",
+                             vif1 ? "VIF1" : "GIF", chain ? "chain" : "normal", data, segs.size(),
+                             (unsigned long long)bytes, (unsigned long long)reader.qwords, reader.vifStop);
+            }
+            else
+            {
+                Stream s{segs};
+                for (int n = 0; n < 1 << 20 && s.more(); ++n)
+                {
+                    if (s.segs[s.seg].second - s.offset >= 16u)
+                        reader.qword(ram, s.address());
+                    s.skip(16);
+                }
+            }
+        }
+
+        // A started VIF1 (1) or GIF (2) channel (BozoEngine's Libraries::dmaStarted, before the I/O library completes
+        // it): CHCR's MOD 1 is a source chain from TADR (TTE: the tags' upper halves go first), else QWC from MADR.
+        uint8_t *g_uploadRam = nullptr;
+        void dmaStarted(uint32_t channel, const bozo::libs::IoState::Channel &c)
+        {
+            if (!g_uploadRam || (channel != 1u && channel != 2u))
+                return;
+            const bool chain = ((c.chcr >> 2) & 3u) == 1u, tte = (c.chcr & 0x40u) != 0;
+            if (!chain && c.qwc)
+                observeSend(g_uploadRam, channel == 1u, c.madr, c.qwc, false, false);
+            else if (chain)
+                observeSend(g_uploadRam, channel == 1u, c.tadr, 0, true, tte);
+        }
+
+        // A record's picture from the uploads into its page: the record's place and size in TBP's buffer (TBW wide),
+        // the newest transfers over it last; indexed formats through the CLUT uploaded at CBP.
+        struct GsPicture
+        {
+            TextureView view;
+            std::vector<uint64_t> serials;
+        };
+        std::map<uint32_t, GsPicture> g_gsPictures; // by record
+        const TextureView *gsPicture(const uint8_t *ram, uint32_t record, uint64_t texa)
+        {
+            if (record < 0x100000u || record + 0x60u > 0x2000000u || g_uploads.empty())
+                return nullptr;
+            const uint64_t tex0 = r64(ram, record + 0x20);
+            const uint32_t tbp = uint32_t(tex0) & 0x3FFFu, psm = uint32_t(tex0 >> 20) & 0x3Fu;
+            const uint32_t cbp = uint32_t(tex0 >> 37) & 0x3FFFu, cpsm = uint32_t(tex0 >> 51) & 15u;
+            const uint32_t csa = uint32_t(tex0 >> 56) & 31u;
+            const uint32_t place = r32(ram, record + 0x10), size = r32(ram, record + 0x14);
+            const uint32_t px = place & 0xFFFFu, py = place >> 16, w = size & 0xFFFFu, h = size >> 16;
+            const uint32_t bpp = bitsPerPixel(psm);
+            if (!bpp || !w || !h || w > 1024u || h > 1024u)
+                return nullptr;
+            // The transfers that cover the picture, and the CLUT's.
+            std::vector<const Upload *> pixels, clut;
+            for (const Upload &u : g_uploads)
+            {
+                if (u.dbp == tbp && u.psm == psm && u.x < px + w && u.x + u.w > px && u.y < py + h && u.y + u.h > py)
+                    pixels.push_back(&u);
+                if ((psm == 0x13u || psm == 0x14u) && u.dbp == cbp && (u.psm == 0u || u.psm == 2u || u.psm == 0x0Au))
+                    clut.push_back(&u);
+            }
+            if (pixels.empty() || ((psm == 0x13u || psm == 0x14u) && clut.empty()))
+                return nullptr;
+            std::vector<uint64_t> serials;
+            for (const Upload *u : pixels)
+                serials.push_back(u->serial);
+            for (const Upload *u : clut)
+                serials.push_back(u->serial);
+            GsPicture &g = g_gsPictures[record];
+            if (g.view.texture && g.serials == serials && g.view.key == (0x3A00000000000000ull | record))
+                return &g.view;
+
+            // A transfer's pixel n (row-major in its rectangle), read from its spans.
+            auto byteAt = [&](const Upload &u, uint64_t offset) -> const uint8_t * {
+                for (const auto &[a, n] : u.spans)
+                {
+                    if (offset < n)
+                        return at(ram, a + uint32_t(offset));
+                    offset -= n;
+                }
+                return nullptr;
+            };
+            auto rawAt = [&](const Upload &u, uint32_t x, uint32_t y) -> uint32_t {
+                const uint64_t n = uint64_t(y - u.y) * u.w + (x - u.x);
+                const uint32_t b = bitsPerPixel(u.psm);
+                const uint8_t *p = byteAt(u, n * b / 8u);
+                if (!p)
+                    return 0;
+                switch (b)
+                {
+                case 4: return (n & 1u) ? (p[0] >> 4) : (p[0] & 15u);
+                case 8: return p[0];
+                case 16: return uint32_t(p[0]) | uint32_t(p[1]) << 8;
+                case 24: return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16;
+                default: return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24;
+                }
+            };
+            const uint32_t ta0 = uint32_t(texa) & 0xFFu, ta1 = uint32_t(texa >> 32) & 0xFFu, aem = uint32_t(texa >> 15) & 1u;
+            auto colour = [&](uint32_t raw, uint32_t format) -> uint32_t { // to RGBA, alpha 0x80 opaque
+                if (format == 0u)
+                    return raw;
+                if (format == 1u)
+                    return raw | ((aem && !(raw & 0xFFFFFFu)) ? 0u : ta0) << 24;
+                const uint32_t r = (raw & 31u) << 3, gg = ((raw >> 5) & 31u) << 3, b = ((raw >> 10) & 31u) << 3;
+                const uint32_t a = (raw & 0x8000u) ? ta1 : ((aem && !(raw & 0x7FFFu)) ? 0u : ta0);
+                return r | gg << 8 | b << 16 | a << 24;
+            };
+            // The CLUT: 16 entries (8 x 2) or 256 (16 x 16, CSM1's order); CSA picks a 16-entry block.
+            std::vector<uint32_t> palette;
+            if (psm == 0x13u || psm == 0x14u)
+            {
+                const uint32_t entries = psm == 0x14u ? 16u : 256u;
+                palette.assign(entries, 0u);
+                for (uint32_t i = 0; i < entries; ++i)
+                {
+                    const uint32_t e = psm == 0x14u ? csa * 16u + i : i;
+                    uint32_t cx, cy;
+                    bozo::render::csm1Position(e, cx, cy);
+                    if (psm == 0x14u && clut.back()->w == 8u)
+                        cx = i & 7u, cy = i >> 3; // an 8 x 2 CLUT of its own
+                    for (const Upload *u : clut)
+                        if (cx >= u->x && cx < u->x + u->w && cy >= u->y && cy < u->y + u->h)
+                            palette[i] = colour(rawAt(*u, cx, cy), u->psm == 0u ? 0u : 2u);
+                }
+            }
+            auto texture = std::make_shared<bozo::render::Texture>();
+            texture->width = w, texture->height = h;
+            texture->rgba.assign(size_t(w) * h, 0u);
+            texture->key = 0x3A00000000000000ull | record;
+            texture->version = g.view.texture ? g.view.texture->version + 1 : 1;
+            for (const Upload *u : pixels)
+                for (uint32_t y = std::max(py, u->y); y < std::min(py + h, u->y + u->h); ++y)
+                    for (uint32_t x = std::max(px, u->x); x < std::min(px + w, u->x + u->w); ++x)
+                    {
+                        const uint32_t raw = rawAt(*u, x, y);
+                        uint32_t c = (psm == 0x13u || psm == 0x14u) ? (raw < palette.size() ? palette[raw] : 0u)
+                                                                    : colour(raw, psm == 0u ? 0u : psm == 1u ? 1u : 2u);
+                        const uint32_t a = std::min<uint32_t>(255u, (c >> 24) * 255u / 128u);
+                        texture->rgba[size_t(y - py) * w + (x - px)] = (c & 0xFFFFFFu) | a << 24;
+                    }
+            g.serials = std::move(serials);
+            g.view = TextureView{};
+            g.view.texture = texture;
+            g.view.key = texture->key;
+            // The record's place is in its page; the picture fills it (su, sv: page size over picture size).
+            const float pw = float(1u << ((tex0 >> 26) & 15u)), ph = float(1u << ((tex0 >> 30) & 15u));
+            g.view.su = pw / float(w), g.view.ou = -float(px) / float(w);
+            g.view.sv = ph / float(h), g.view.ov = -float(py) / float(h);
+            return &g.view;
+        }
+
         // A record outside the banks (an effect's own, made when it uploads a picture): the picture of a loaded
         // resource's TIM2 with the same size and the same TEX0 but for where it went (TBP, TBW, CBP, CSA: a picture's
         // header keeps its file's addresses). The forests' screen sparkles (0x22E1C8) use one.
@@ -1679,6 +2110,11 @@ namespace jc2
                     view = residentRecord(ram, record), source = "bank";
                     if (!view && record >= 0x100000u && record + 0x60u <= 0x2000000u)
                         view = residentCopy(ram, record), source = "bank copy";
+                    if (!view)
+                    {
+                        const uint64_t texa = gs && r32(ram, gs + 0x18) == 0x3Bu ? r64(ram, gs + 0x10) : 0x80ull;
+                        view = gsPicture(ram, record, texa), source = "upload";
+                    }
                     if (!view)
                         view = uploadedPicture(ram, record), source = "TIM2";
                     if (view)
@@ -1845,6 +2281,20 @@ namespace jc2
                                  mode, caller, count, record, draw.texture ? "yes" : "no", draw.vertices.size(),
                                  m.depthTest, m.alphaTest, m.alphaRef, x0, x1, y0, y1, a0, a1, ta0, ta1, source, u0, u1);
                 }
+                // JC2_DUMP_EFFECT_TEXTURES=dir: each effect texture once, as raw RGBA (record_wxh.rgba).
+                static const char *dumpDir = std::getenv("JC2_DUMP_EFFECT_TEXTURES");
+                static std::set<uint32_t> dumped;
+                if (dumpDir && draw.texture && dumped.insert(record).second)
+                {
+                    char name[512];
+                    std::snprintf(name, sizeof name, "%s/%08x_%ux%u.rgba", dumpDir, record, draw.texture->width,
+                                  draw.texture->height);
+                    if (FILE *f = std::fopen(name, "wb"))
+                    {
+                        std::fwrite(draw.texture->rgba.data(), 4, draw.texture->rgba.size(), f);
+                        std::fclose(f);
+                    }
+                }
                 if (std::getenv("JC2_WATER_NODEPTH"))
                     m.depthTest = false;
             }
@@ -2000,6 +2450,13 @@ namespace jc2
         g_blended.clear();
     }
 
+    // The GS uploads, noted as the game starts its VIF1 and GIF transfers.
+    void installUploads(bozo::libs::Libraries &libraries, uint8_t *ram)
+    {
+        g_uploadRam = ram;
+        libraries.dmaStarted = dmaStarted;
+    }
+
     void installMeshes(Runtime &rt, bozo::port::Registry &r)
     {
         g_rt = &rt;
@@ -2068,6 +2525,32 @@ namespace jc2
             g_blended.clear();
             g_fades.clear();
             g_effects.clear();
+            g_gsPictures.clear();
+            g_uploadedViews.clear();
         }
+    }
+
+    // The uploads noted (GS pages and where their pixels are in RAM): a state saved before they were saved has
+    // none, and the effects started before it find their textures again when the game uploads them.
+    void uploadsState(bozo::state::Archive &a)
+    {
+        if (a.loading() && a.sectionLeft() == 0)
+        {
+            g_uploads.clear();
+            return;
+        }
+        uint64_t n = bozo::state::count(a, g_uploads.size());
+        if (a.loading())
+            g_uploads.assign(size_t(n), Upload{});
+        for (Upload &u : g_uploads)
+        {
+            bozo::state::fields(a, u.dbp, u.dbw, u.psm, u.x, u.y, u.w, u.h, u.serial);
+            uint64_t spans = bozo::state::count(a, u.spans.size());
+            if (a.loading())
+                u.spans.assign(size_t(spans), {0u, 0u});
+            for (auto &[address, bytes] : u.spans)
+                bozo::state::fields(a, address, bytes);
+        }
+        bozo::state::fields(a, g_uploadSerial);
     }
 }

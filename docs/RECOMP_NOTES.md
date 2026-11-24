@@ -710,6 +710,19 @@ Mapped from SLUS_203.09 (`runtime/jc2_debug.cpp`), for testing without playing u
   (0x89DD00: record, TIM2), but matching a record to a loaded TIM2 by format and size is ambiguous (five candidates
   in that forest), so it is used only when unique. Both stay undrawn for now. The way out: follow the game's own
   uploads (which picture went to which page and CLUT) instead of guessing from the record.
+- Uploads followed (2026-11-24): the game starts its VIF1 and GIF transfers itself (its packet lists' kick
+  0x13E0D8 / 0x13E1D4 and others write CHCR; it never calls sceDmaSend for them), so BozoEngine gained
+  Libraries::dmaStarted (called as a channel starts, before the I/O library completes it). JC2 walks the chain
+  (DMA tags; with TTE each tag's whole qword reaches VIF1, its lower half ignored: kept as padding, or DIRECT's data
+  lands half a qword off), VIF1's codes (DIRECT carries GIF data; UNPACK, MPG, STMASK, STROW / STCOL skipped by
+  size) and the GIF stream, and notes each image transfer (BITBLTBUF, TRXPOS, TRXREG, then IMAGE: the RAM its pixels
+  came from). An effect record outside the banks is then assembled from the transfers into its page (CT32 / 24 /
+  16, PSMT8 / 4 with the CLUT uploaded at CBP, TEXA from the effect's parameters) and read from that RAM, as TIM2
+  pictures are; no GS memory. The Wind Forest's whole frame chain (about 2 MB, 25,000 GIF qwords) walks through.
+  Its dust motes (mode 0x400, a 64 x 64 4-bit grain cloud) now draw from their upload when the forest is entered
+  in the run (a state saved before the upload map existed has none: the effects started before it stay undrawn).
+  The light spots' page 0x3800 gets no upload in the Wind Forest: still undrawn. JC2_TRACE_UPLOADS=1 lists the
+  chains and transfers, JC2_DUMP_EFFECT_TEXTURES=dir writes each effect texture once.
 - Engine master since this merge answers the IPU's registers as an idle decoder (libs/io.cpp), so without the native
   player the game would no longer stop there: it would run on with frames never written.
 - Testing gotcha: `timeout` (msys) and `scripts/bench_run.sh` lose variables set in front of them (JC2_TRACE_*): put

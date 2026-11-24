@@ -52,6 +52,8 @@ namespace jc2
     void audioState(bozo::state::Archive &);
     std::string audioUnsaveable();
     void meshesState(bozo::state::Archive &);
+    void uploadsState(bozo::state::Archive &);
+    void installUploads(bozo::libs::Libraries &, uint8_t *ram);
     void reset2D();
 } // namespace jc2
 
@@ -179,6 +181,7 @@ static int run(int argc, char **argv)
     // JC2_TRACE_SIF=1: the IOP modules the game asks for and the RPC services it binds.
     const bool traceSif = std::getenv("JC2_TRACE_SIF") != nullptr;
     jc2::installAudio(host.libraries(), traceSif);
+    jc2::installUploads(host.libraries(), d.runtime().memory.ram());
     // A disc read finishes after the drive's time, its callback then: the title menu clears its glow texture's
     // pointer right after asking for it and counts on the read's callback setting it later (otherwise the menu's
     // records land in a zero-size block and the save loaded there fails its check).
@@ -189,6 +192,7 @@ static int run(int argc, char **argv)
                                    jc2::portState(a, d.runtime());
                                    jc2::audioState(a);
                                    jc2::meshesState(a);
+                                   jc2::uploadsState(a); // last: older states end before it
                                    if (a.loading())
                                        jc2::reset2D();
                                },
