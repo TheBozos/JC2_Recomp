@@ -730,6 +730,12 @@ Mapped from SLUS_203.09 (`runtime/jc2_debug.cpp`), for testing without playing u
   stretched by 2.14393 for the turn) and path 0x1C30 (mode 0x80: colour, a direction t, (x, y, z, width); a ribbon,
   p +- (VU 27 x t) width, one strip a batch). Lilith's Nest's fireflies: spinning sparks (0x20) with ribbon trails
   (0x80), additive (ALPHA 0x48: Cs As + Cd), fading in after arrival.
+- Towns and battles (same survey; Arena route for D001, the two battle states): mode 0x10 in the Room of Life (49)
+  and the Jade Throne Room (50) from 0x422A9C, mode 0x1000 in the Training Forest (44) from 0x47C118, none in the
+  battles. Translated: path 0xC50 (mode 0x10: (x, y, z, size), colour; path 0x1240's camera-facing quad, not turned)
+  and path 0x18F8 (mode 0x1000: (x, y, z, size), colour, (cos, sin); path 0x1630's flat quad turned about y,
+  corners p - u, p + w, p - w, p + u with u = (h sin, 0, -h cos), w = (h cos, 0, h sin); 25 a batch, 3 qwords). Both
+  small (8 elements), depth-tested, additive; not yet told apart on screen from the scenes' own lights.
 - Engine master since this merge answers the IPU's registers as an idle decoder (libs/io.cpp), so without the native
   player the game would no longer stop there: it would run on with frames never written.
 - Testing gotcha: `timeout` (msys) and `scripts/bench_run.sh` lose variables set in front of them (JC2_TRACE_*): put

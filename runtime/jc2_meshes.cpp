@@ -2037,7 +2037,7 @@ namespace jc2
                 uint32_t bit, batch, qwords;
             } kShapes[] = {{0x1, 42, 2},   {0x2, 42, 2},   {0x4, 34, 2},   {0x8, 34, 2},   {0x10, 25, 2},
                            {0x2000, 25, 2}, {0x20, 25, 3},  {0x40, 25, 2},  {0x80, 20, 3},  {0x100, 40, 2},
-                           {0x200, 0, 2},   {0x400, 25, 2}, {0x800, 20, 3}};
+                           {0x200, 0, 2},   {0x400, 25, 2}, {0x800, 20, 3}, {0x1000, 25, 3}};
             for (const auto &s : kShapes)
                 if (mode & s.bit)
                 {
@@ -2081,7 +2081,9 @@ namespace jc2
             const bool known = programDShape(mode, ram, object, batchSize, qwords);
             // Native: modes 2 (strips: the water), 0x40 (world quads) and 0x400 (screen quads). Others are listed once.
             const bool native =
-                known && batchSize && (mode == 2u || mode == 0x20u || mode == 0x40u || mode == 0x80u || mode == 0x400u);
+                known && batchSize &&
+                (mode == 2u || mode == 0x10u || mode == 0x20u || mode == 0x40u || mode == 0x80u || mode == 0x400u ||
+                 mode == 0x1000u);
             auto notDrawn = [&](const char *why) {
                 static std::set<uint64_t> seen;
                 if (seen.size() < 64 && seen.insert(uint64_t(mode) << 32 | caller).second)
@@ -2216,21 +2218,24 @@ namespace jc2
                     }
                 }
             }
-            else if (mode == 0x20u)
+            else if (mode == 0x20u || mode == 0x10u)
             {
                 // Path 0x1240: per element (x, y, z, size), colour, (cos, sin); a camera-facing quad, p -+ a s -+ b s
                 // with a = VU 28 (the view's y row, negated), b = VU 27 x a (VU 27: its z row), turned on screen about
                 // its centre by the angle (in the field: y stretched by 2.14393 for the turn, then back); ST as path
-                // 0x1630; dropped whole when a corner is outside the clip volume.
+                // 0x1630; dropped whole when a corner is outside the clip volume. Path 0xC50 (mode 0x10): the same
+                // quad from (x, y, z, size), colour, not turned.
+                const bool turned = mode == 0x20u;
+                const uint32_t stride = turned ? 48u : 32u;
                 const float az[3] = {view4.m[2], view4.m[6], view4.m[10]};
                 const float a[3] = {-view4.m[1], -view4.m[5], -view4.m[9]};
                 const float b[3] = {az[1] * a[2] - az[2] * a[1], az[2] * a[0] - az[0] * a[2], az[0] * a[1] - az[1] * a[0]};
                 const float st[4][2] = {{u1, v1}, {u1, v0}, {u0, v1}, {u0, v0}};
                 for (uint32_t i = 0; i < count; ++i)
                 {
-                    const uint32_t q = buffer + i * 48u;
+                    const uint32_t q = buffer + i * stride;
                     const float p[3] = {rf(ram, q), rf(ram, q + 4), rf(ram, q + 8)}, s = rf(ram, q + 12);
-                    const float c = rf(ram, q + 32), sn = rf(ram, q + 36);
+                    const float c = turned ? rf(ram, q + 32) : 1.0f, sn = turned ? rf(ram, q + 36) : 0.0f;
                     const uint32_t col = colourAt(q + 16);
                     // Corners 15, 16, 19, 20: -a -b, +a -b, -a +b, +a +b.
                     const float sa[4] = {-1, 1, -1, 1}, sb[4] = {-1, -1, 1, 1};
@@ -2255,8 +2260,11 @@ namespace jc2
                     };
                     float r0[2], r1[2];
                     turn(scr[0], r0), turn(scr[1], r1);
-                    const float xy[4][2] = {{cx + r0[0], cy + r0[1]}, {cx + r1[0], cy + r1[1]}, {cx - r1[0], cy - r1[1]},
-                                            {cx - r0[0], cy - r0[1]}};
+                    float xy[4][2] = {{cx + r0[0], cy + r0[1]}, {cx + r1[0], cy + r1[1]}, {cx - r1[0], cy - r1[1]},
+                                      {cx - r0[0], cy - r0[1]}};
+                    if (!turned)
+                        for (int k = 0; k < 4; ++k)
+                            xy[k][0] = scr[k][0], xy[k][1] = scr[k][1];
                     bozo::render::Vertex out[4];
                     for (int k = 0; k < 4; ++k)
                     {
@@ -2304,6 +2312,34 @@ namespace jc2
                             v[1] = out, ok[1] = inside;
                         }
                     }
+                }
+            }
+            else if (mode == 0x1000u)
+            {
+                // Path 0x18F8: per element (x, y, z, size), colour, (cos, sin); the flat x z quad of path 0x1630 turned
+                // about y: p - u, p + w, p - w, p + u with u = (h sin, 0, -h cos), w = (h cos, 0, h sin), h = size / 2;
+                // ST as path 0x1630; dropped whole when a corner is outside the clip volume.
+                const float st[4][2] = {{u1, v1}, {u1, v0}, {u0, v1}, {u0, v0}};
+                for (uint32_t i = 0; i < count; ++i)
+                {
+                    const uint32_t q = buffer + i * 48u;
+                    const float x = rf(ram, q), y = rf(ram, q + 4), z = rf(ram, q + 8), h = rf(ram, q + 12) * 0.5f;
+                    const float c = rf(ram, q + 32), sn = rf(ram, q + 36);
+                    const float u[3] = {h * sn, 0, -h * c}, w[3] = {h * c, 0, h * sn};
+                    const float corners[4][3] = {{x - u[0], y, z - u[2]}, {x + w[0], y, z + w[2]}, {x - w[0], y, z - w[2]},
+                                                 {x + u[0], y, z + u[2]}};
+                    const uint32_t col = colourAt(q + 16);
+                    bozo::render::Vertex out[4];
+                    bool ok = true;
+                    for (int k = 0; k < 4 && ok; ++k)
+                    {
+                        float s[3] = {0, 0, 0}, wq = 0;
+                        ok = insideClip(cw, corners[k]) && project(pvw, corners[k], s, wq);
+                        out[k].x = s[0], out[k].y = s[1], out[k].z = s[2], out[k].rgba = col;
+                        uv(st[k][0], st[k][1], out[k]);
+                    }
+                    if (ok)
+                        draw.vertices.insert(draw.vertices.end(), {out[0], out[1], out[2], out[1], out[2], out[3]});
                 }
             }
             else if (mode == 0x40u)
