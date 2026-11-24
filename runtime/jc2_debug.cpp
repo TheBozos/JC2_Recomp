@@ -216,6 +216,19 @@ namespace jc2
             r16(ram, scene + 6) == 1)
         {
             g_request = -1;
+            // A field scene only: kind 0 (the forests) or 1 (entry +0x1C), which have an entry function (+4): 574 of
+            // the 1208. Kinds 2 to 5 have none (the game enters them another way); a teleport there jumped to 0.
+            const uint32_t entry = kSceneTable + 32u * uint32_t(target);
+            if (target >= kSceneCount || r32(ram, entry + 0x1C) > 1u || !r32(ram, entry + 4))
+            {
+                const std::string message = "Teleport: " + sceneLabel(target) + " is not a field scene (kind " +
+                                            std::to_string(target < kSceneCount ? r32(ram, entry + 0x1C) : 0) + ")";
+                std::printf("[jc2:debug] frame %llu: %s\n", (unsigned long long)g_frame.load(), message.c_str());
+                if (g_message)
+                    g_message(message);
+                rt->functions.generated(kSceneStep)(ram, ctx, rt);
+                return;
+            }
             const int16_t next = int16_t(target), leaving = 3;
             std::memcpy(ram + kSceneNext, &next, 2);
             std::memcpy(ram + scene + 6, &leaving, 2);

@@ -668,6 +668,12 @@ Mapped from SLUS_203.09 (`runtime/jc2_debug.cpp`), for testing without playing u
     --battle-group now launches a kind 3 battle with the group as the party (the same record layout): group 145
     ("eM2ARENA_BATTLE_LV2_3") from the Arena hub plays (the enemies act, their effects, "No Divine Beasts." when the
     partner falls). The tutorials' and events' battle scripts (dialogue, scripted turns) do not run that way.
+- Scene tour (2026-11-24: Throne Room state, --scene to 42 scenes across the table, 440 frames each, headless): 25
+  run; 14 stop with a jump to 0 at 0x1A0FF0 right after the teleport: the scene table's kind (+0x1C) 2 to 5 has no
+  entry function (+4 = 0: 634 of the 1208, cutscene and event stages the game enters another way), so the teleport
+  now refuses those ("not a field scene"; kinds 0, the forests, and 1 have it: 574). The other 3 are stubs or
+  unused: CE20's module is 0x140 bytes (two functions) and its table entry points past it (0x940140), U123 and U559
+  read garbage. No new program D mode, no model or texture not found in the 25 that ran.
 
 ## IPU animations (2026-11-23)
 
