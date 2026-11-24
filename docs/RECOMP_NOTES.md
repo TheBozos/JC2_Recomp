@@ -852,3 +852,19 @@ fifth VU1 program (kind 5: microcode 0x4DFBF0, 107 pairs, uploaded by 0x1FB330).
   up (0x1F5290 from the scene scripts, resources 0xD02 / 0xD04 through the callback 0x4AF7D0). A stage forced
   without that event leaves it null and the routine faults in sceVu0CopyVector within 8 frames: an artifact of
   forcing the stage (Dark Wind 12, Dark Fire 24), not a port fault. No forest's table sets bit 0x40 (0x205990).
+
+## Memory card saves on BozoEngine (2026-11-24)
+
+- Loading: the title's Continue lists the card's slots and loads (s0 the fork's save of the Training Forest: "Load
+  Successful", back in the forest). The game takes a slot's file as the directory listing's entry slot + 6, so the
+  listing must keep the card's creation order (BozoEngine's card lists by the host files' creation times): a card
+  folder copied file by file in another order (cp -r: names) lists every slot empty and Cross loads nothing.
+- Saving: the hub menu's Save (s23945_hub_menu: five Downs, Cross, Yes, a slot, Yes) writes the save (141,940
+  bytes); on an empty card the game makes the folder, icon.sys, the three icons and the three slot files first.
+  Loaded again in a fresh boot it resumes at the hub.
+- Fixed in BozoEngine (jc2/native-irx-host): a save state restored the cards' contents but not their host folder,
+  so every save made after `--load-state` stayed in memory and was lost. A state loaded now takes cards kept in a
+  folder back from the folder (a console's memory card is not part of a save state); cards in memory stay the
+  state's. And state::Archive::end closed a section before checking its size: a reader trying an older layout
+  (the libraries' sif section) that failed there rewound into a nameless section and the load failed further on.
+  Both with tests (bozo-libs-tests, bozo-state-tests).

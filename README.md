@@ -41,7 +41,7 @@ a time. Windows comes first, then Linux.
 | Animated IPU textures decoded natively (D001's water) | ✅ |
 | Forest and town effects (VU1 program D: water, rain, spores, fireflies, dust, motes; program E: the Fire Forest's heat haze) | 🔧 |
 | Debug teleport (`--scene`, field scenes), battle launcher (`--battle`, `--battle-group`), story state (`--chapter`, `--subarea`...) | ✅ |
-| Memory card saves | ⏳ |
+| Memory card saves (save at the hub, Continue from the title) | ✅ |
 | Linux build | ⏳ |
 | Widescreen, higher internal resolution | ⏳ |
 
