@@ -1466,28 +1466,32 @@ namespace jc2
             rt->functions.generated(kPrimitiveDrawer)(ram, ctx, rt);
         }
 
-        // ---- Water surfaces: 0x206850, VU1 program D (microcode 0x4DFF60) ----
-        // The water system at 0x89D3E0: +0x14 the tiles queued this frame, +0x20 their positions (16 bytes each),
-        // +0x200 the grid being drawn (its vertex buffer; the system double-buffers it), +0x210 / +0x220 the grid's
-        // bounds (x, -, z), +0x260 the texture record (+0x14 size, +0x20 TEX0; the scene's animation plays into it). The
-        // routine moves the waves, then for each tile submits the grid with world = translation to the tile (scale
-        // 1.0) and the frame's camera (0x6CC5F4[0]) through 0x4314E0's program D path, and clears the queue. The grid:
-        // rows of batches, each a strip of vertices of two qwords, (S, T, 1, 0) then (x, y, z, 1), y the wave height;
-        // S and T run 0..2 over the tile (the 64 x 64 texture repeats: CLAMP region repeat). GS state as the program
-        // draws it: ALPHA (Cs - Cd) FIX + Cd, FIX 0x3F, depth test GEQUAL, no depth write.
-        // Native: the same strips with program C's projection (P V W, field y), the texture the latest picture the
-        // game took from its IPU animation (the object 0x80 after the record: its ring in RAM, the CSC's macroblocks).
-        // Program D's path for these (VU 53.x = 2, from 0x5B0; init at 0: VU 0x49 = P V W, 0x55 = clip W) has the
-        // same maths, no height offset. JC2_TRACE_WATER=1 traces the draws (JC2_WATER_NODEPTH=1: without the depth
-        // test; JC2_WATER_DY: a height offset), JC2_TRACE_AREA / JC2_TRACE_AREA_FILE the room's heights over an area.
-        constexpr uint32_t kWaterDraw = 0x00206850u;
-        constexpr uint32_t kWater = 0x0089D3E0u;
+        // ---- VU1 program D (microcode 0x4DFF60): the forests' effects and the water ----
+        // The frame's effects task (0x4333B0) calls one routine per bit of the area's effect flags (0x433AF0 sets them
+        // per forest and sub-area from the table at 0x64E2F0). Most of them (bits 0x1 water, 0x2, 0x4, 0x8, 0x10, 0x20,
+        // 0x80, 0x400, 0x800, 0x1000, 0x8000) draw through 0x4314E0(object, position, texture animation, GS parameters,
+        // t0, camera index; f12 scale): world = translation to the position times the scale, the camera 0x6CC5F4[i].
+        // The object: +0 its vertex buffer, +0x10 / +0x20 its bounds, +0x30 the mode (VU 53.x: program D's path),
+        // +0x34 its vertex count, +0x38 / +0x3C kinds, +0x40 1: box-tested. The animation: +0 the picture, +0x10 its
+        // texture records (0x60 bytes each) when +0x14 is 0. GS parameters: +0 ALPHA's A B C D, +4 its FIX. Each batch
+        // of the buffer (programDShape) is a strip. Mode 2 (the water): (S, T, 1, 0) then (x, y, z, 1) a vertex; the
+        // program (path at 0x5B0; init at 0: VU 0x49 = P V W, 0x55 = clip W) projects by P V W and clips by clip W, as
+        // program C's projection here; depth test GEQUAL, no depth write. The water's texture is the picture the game
+        // took last from its IPU animation (the object 0x80 after the record: its ring in RAM, the CSC's macroblocks).
+        // The other modes are listed once ("not drawn yet"). JC2_TRACE_PROGRAM_D=1 traces the draws
+        // (JC2_WATER_NODEPTH=1: without the depth test; JC2_WATER_DY: a height offset), JC2_TRACE_AREA /
+        // JC2_TRACE_AREA_FILE the room's heights over an area.
+        constexpr uint32_t kProgramD = 0x004314E0u; // the program D submitter: one object a call
         struct WaterTexture
         {
             std::shared_ptr<bozo::render::Texture> texture;
             uint64_t hash = 0;
         };
         std::map<uint32_t, WaterTexture> g_waterTextures; // by texture record
+        // GS page 0x3800: the water effect's init (0x2063E0 -> 0x433CE0) plays its IPU animation there, and other
+        // effects sample the page (the forests' light spots, 0x22D7D8's record): the last picture taken from it.
+        constexpr uint32_t kAnimationPage = 0x3800u;
+        std::shared_ptr<const bozo::render::Texture> g_animationPage;
 
         std::shared_ptr<const bozo::render::Texture> waterTexture(const uint8_t *ram, uint32_t record)
         {
@@ -1509,8 +1513,13 @@ namespace jc2
             for (uint32_t i = 0; i < frameBytes; i += 64)
                 hash = (hash ^ (uint64_t(src[i]) | uint64_t(src[i + 1]) << 8 | uint64_t(src[i + 2]) << 16)) * 1099511628211ull;
             WaterTexture &t = g_waterTextures[record];
+            const bool onPage = (r64(ram, record + 0x20) & 0x3FFFu) == kAnimationPage;
             if (t.texture && t.hash == hash)
+            {
+                if (onPage)
+                    g_animationPage = t.texture;
                 return t.texture;
+            }
             auto texture = std::make_shared<bozo::render::Texture>();
             texture->width = w, texture->height = h;
             texture->rgba.resize(size_t(w) * h);
@@ -1531,77 +1540,237 @@ namespace jc2
                         }
                 }
             t.texture = texture, t.hash = hash;
+            if (onPage)
+                g_animationPage = texture;
             return texture;
         }
 
-        void waterDraw(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+        // A record outside the banks (an effect's own, made when it uploads a picture): the picture of a loaded
+        // resource's TIM2 with the same size and the same TEX0 but for where it went (TBP, TBW, CBP, CSA: a picture's
+        // header keeps its file's addresses). The forests' screen sparkles (0x22E1C8) use one.
+        std::map<uint32_t, TextureView> g_uploadedViews; // by record; cleared with the loaded resources' changes
+        size_t g_uploadedLoaded = 0;
+        const TextureView *uploadedPicture(const uint8_t *ram, uint32_t record)
         {
-            const uint32_t tiles = std::min<uint32_t>(r32(ram, kWater + 0x14), 64u);
-            float positions[64][3];
-            for (uint32_t i = 0; i < tiles; ++i)
+            if (record < 0x100000u || record + 0x60u > 0x2000000u)
+                return nullptr;
+            if (g_uploadedLoaded != g_loaded.size())
+                g_uploadedViews.clear(), g_uploadedLoaded = g_loaded.size();
+            auto found = g_uploadedViews.find(record);
+            if (found != g_uploadedViews.end())
+                return found->second.texture ? &found->second : nullptr;
+            TextureView &view = g_uploadedViews[record];
+            const uint64_t kWhere = 0x3FFFull | 0x3Full << 14 | 0x3FFFull << 37 | 0x1Full << 56; // TBP TBW CBP CSA
+            const uint64_t tex0 = r64(ram, record + 0x20) & ~kWhere;
+            const uint32_t size = r32(ram, record + 0x14);
+            // Only a single candidate: pictures of the same format and size are common (the Wind Forest has five for
+            // its sparkles' record, with different palettes), and the wrong one is worse than none.
+            uint32_t match = 0, matches = 0;
+            for (const auto &[base, loaded] : g_loaded)
+            {
+                const uint32_t n = r32(ram, base);
+                if (!n || n > 64u)
+                    continue;
+                for (uint32_t i = 0; i < n; ++i)
+                {
+                    const uint32_t sub = base + r32(ram, base + 4 + 4 * i);
+                    if (sub >= base + loaded.size || std::memcmp(at(ram, sub), "TIM2", 4) != 0)
+                        continue;
+                    for (const uint32_t picture : tim2Pictures(ram, sub))
+                        if (r32(ram, picture + 20) == size && (r64(ram, picture + 0x18) & ~kWhere) == tex0)
+                            match = picture, ++matches;
+                }
+            }
+            if (matches != 1)
+                return nullptr;
+            view.key = 0x3B00000000000000ull | match;
+            view.texture = decodeTim2Picture(at(ram, match), 0, view.key);
+            if (!view.texture)
+                return nullptr;
+            // The record's place is in its page; the picture fills it (su, sv: page size over picture size).
+            const float pw = float(1u << ((r64(ram, record + 0x20) >> 26) & 15u));
+            const float ph = float(1u << ((r64(ram, record + 0x20) >> 30) & 15u));
+            const uint32_t place = r32(ram, record + 0x10);
+            const float w = float(view.texture->width), h = float(view.texture->height);
+            view.su = pw / w, view.ou = -float(place & 0xFFFFu) / w;
+            view.sv = ph / h, view.ov = -float(place >> 16) / h;
+            return &view;
+        }
+
+        // The batches program D's path takes per mode (0x432170: VU 53.x = the object's +0x30): vertices per batch
+        // (each batch its own strip) and qwords per vertex.
+        bool programDShape(uint32_t mode, const uint8_t *ram, uint32_t object, uint32_t &batch, uint32_t &qwords)
+        {
+            static const struct
+            {
+                uint32_t bit, batch, qwords;
+            } kShapes[] = {{0x1, 42, 2},   {0x2, 42, 2},   {0x4, 34, 2},   {0x8, 34, 2},   {0x10, 25, 2},
+                           {0x2000, 25, 2}, {0x20, 25, 3},  {0x40, 25, 2},  {0x80, 20, 3},  {0x100, 40, 2},
+                           {0x200, 0, 2},   {0x400, 25, 2}, {0x800, 20, 3}};
+            for (const auto &s : kShapes)
+                if (mode & s.bit)
+                {
+                    batch = s.bit == 0x200 ? r32(ram, object + 0x34) : s.batch; // 0x200: the whole buffer at once
+                    qwords = s.qwords;
+                    return true;
+                }
+            return false;
+        }
+
+        void programD(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+        {
+            // 0x4314E0(object, position, texture animation, GS parameters, t0, camera index; f12 scale). Read before the
+            // routine runs: it advances the animation and builds the game's own packets.
+            const uint32_t object = ctx->r[4].uw[0], position = ctx->r[5].uw[0], anim = ctx->r[6].uw[0];
+            const uint32_t gs = ctx->r[7].uw[0], cameraIndex = ctx->r[9].uw[0] & 3u, caller = ctx->r[31].uw[0];
+            const float scale = ctx->f[12];
+            const bool valid = object >= 0x100000u && object + 0x44u <= 0x2000000u && position >= 0x100000u &&
+                               position + 16u <= 0x2000000u;
+            uint32_t mode = 0, count = 0, buffer = 0, record = 0;
+            float pos[3] = {0, 0, 0};
+            uint32_t gsWords[3] = {0, 0, 0};
+            if (valid)
+            {
+                mode = r32(ram, object + 0x30), count = r32(ram, object + 0x34), buffer = r32(ram, object);
                 for (int k = 0; k < 3; ++k)
-                    positions[i][k] = rf(ram, kWater + 0x20 + 16u * i + 4u * k);
-            rt->functions.generated(kWaterDraw)(ram, ctx, rt); // the waves, the game's own packets, the queue cleared
-            const uint32_t camera = r32(ram, 0x006CC5F4u);
-            if (meshesOff || !tiles || !camera)
-                return;
-            const uint32_t grid = r32(ram, kWater + 0x200);
-            if (grid < 0x100000u || grid + 0x40u > 0x2000000u)
-                return;
-            // The grid's shape from its bounds and first vertices: columns along x in a strip, rows along z.
-            const float minX = rf(ram, kWater + 0x210), minZ = rf(ram, kWater + 0x218);
-            const float maxX = rf(ram, kWater + 0x220), maxZ = rf(ram, kWater + 0x228);
-            const float dx = rf(ram, grid + 0x40 + 16) - rf(ram, grid + 16), dz = rf(ram, grid + 0x20 + 24) - rf(ram, grid + 24);
-            if (!(dx > 1e-4f) || !(dz > 1e-4f) || !(maxX > minX) || !(maxZ > minZ))
-                return;
-            const uint32_t columns = static_cast<uint32_t>(std::lround((maxX - minX) / dx));
-            const uint32_t rows = static_cast<uint32_t>(std::lround((maxZ - minZ) / dz));
-            if (!columns || !rows || columns > 256u || rows > 256u)
-                return;
-            const uint32_t strip = 2u * (columns + 1u); // vertices per batch
-            if (grid + size_t(rows) * strip * 32u > 0x2000000u)
+                    pos[k] = rf(ram, position + 4u * k);
+                if (anim >= 0x100000u && anim + 0x18u <= 0x2000000u && r32(ram, anim + 0x14) == 0)
+                    record = r32(ram, anim + 0x10) + 0x60u * r32(ram, anim);
+                if (gs >= 0x100000u && gs + 12u <= 0x2000000u)
+                    for (int k = 0; k < 3; ++k)
+                        gsWords[k] = r32(ram, gs + 4u * k);
+            }
+            rt->functions.generated(kProgramD)(ram, ctx, rt);
+            const uint32_t camera = r32(ram, 0x006CC5F4u + 4u * cameraIndex);
+            if (meshesOff || !valid || !camera || !count || buffer < 0x100000u)
                 return;
 
+            static const bool traceProgramD = std::getenv("JC2_TRACE_PROGRAM_D") != nullptr;
+            uint32_t batchSize = 0, qwords = 0;
+            const bool known = programDShape(mode, ram, object, batchSize, qwords);
+            // Native: modes 2 (strips: the water), 0x40 (world quads) and 0x400 (screen quads). Others are listed once.
+            const bool native = known && batchSize && (mode == 2u || mode == 0x40u || mode == 0x400u);
+            auto notDrawn = [&](const char *why) {
+                static std::set<uint64_t> seen;
+                if (seen.size() < 64 && seen.insert(uint64_t(mode) << 32 | caller).second)
+                    std::fprintf(stderr, "[jc2:programD] not drawn (%s): mode %#x from %#x, %u vertices at %#x (%u a batch, "
+                                         "%u qwords), record %#x, GS %#x %#x %#x\n",
+                                 why, mode, caller, count, buffer, batchSize, qwords, record, gsWords[0], gsWords[1],
+                                 gsWords[2]);
+            };
+            if (!native)
+            {
+                notDrawn("mode not translated yet");
+                return;
+            }
+            if (buffer + size_t(count) * qwords * 16u > 0x2000000u)
+                return;
+
+            // The texture: the record's IPU animation, a bank record (or a copy of one), or the animation page.
             ScreenDraw draw;
-            draw.texture = waterTexture(ram, r32(ram, kWater + 0x260));
+            const TextureView *view = nullptr;
+            const char *source = "none";
+            if (record)
+            {
+                draw.texture = waterTexture(ram, record);
+                source = "IPU";
+                if (!draw.texture)
+                {
+                    view = residentRecord(ram, record), source = "bank";
+                    if (!view && record >= 0x100000u && record + 0x60u <= 0x2000000u)
+                        view = residentCopy(ram, record), source = "bank copy";
+                    if (!view)
+                        view = uploadedPicture(ram, record), source = "TIM2";
+                    if (view)
+                        draw.texture = view->texture;
+                }
+                if (!draw.texture && (r64(ram, record + 0x20) & 0x3FFFu) == kAnimationPage)
+                    draw.texture = g_animationPage;
+                if (!draw.texture)
+                {
+                    notDrawn("no texture");
+                    return;
+                }
+            }
+            // The record's picture in its page, as the program gets it (0x431C90: VU 55 = place / page size, VU 54 =
+            // (place + size) / page size); a bank view then maps page coordinates to its picture.
+            float u0 = 0, v0 = 0, u1 = 1, v1 = 1;
+            if (record)
+            {
+                const uint64_t tex0 = r64(ram, record + 0x20);
+                const float pw = float(1u << ((tex0 >> 26) & 15u)), ph = float(1u << ((tex0 >> 30) & 15u));
+                const uint32_t place = r32(ram, record + 0x10), size = r32(ram, record + 0x14);
+                u0 = float(place & 0xFFFFu) / pw, v0 = float(place >> 16) / ph;
+                u1 = u0 + float(size & 0xFFFFu) / pw, v1 = v0 + float(size >> 16) / ph;
+            }
+            auto uv = [&](float u, float t, bozo::render::Vertex &out) {
+                if (view)
+                    u = u * view->su + view->ou, t = t * view->sv + view->ov;
+                out.u = u, out.v = t;
+            };
+
+            // GS state from the parameters: ALPHA at +0 (FIX in its high word), TEST at +0x20 (A+D pairs).
             bozo::render::Material &m = draw.material;
             m.textured = draw.texture != nullptr;
             m.directColour = !m.textured;
-            m.clampU = m.clampV = false;
+            m.clampU = m.clampV = mode != 2u;
             m.gsBlend = true;
-            m.blendA = 0, m.blendB = 1, m.blendC = 2, m.blendD = 1, m.blendFix = 0x3F;
+            const uint32_t abcd = gsWords[0] & 0xFFu;
+            m.blendA = abcd & 3u, m.blendB = (abcd >> 2) & 3u, m.blendC = (abcd >> 4) & 3u, m.blendD = (abcd >> 6) & 3u;
+            m.blendFix = static_cast<uint8_t>(gsWords[1]);
             m.depthTest = true, m.depthWrite = false;
+            if (gs && r32(ram, gs + 0x28) == 0x47u)
+            {
+                const uint32_t test = r32(ram, gs + 0x20);
+                const uint32_t zte = (test >> 16) & 1u, ztst = (test >> 17) & 3u;
+                m.depthTest = zte && ztst != 1u; // ALWAYS: no test
+                const uint32_t ate = test & 1u, atst = (test >> 1) & 7u, aref = (test >> 4) & 0xFFu;
+                if (ate && (atst == 5u || atst == 6u))
+                {
+                    m.alphaTest = true;
+                    m.alphaFunc = bozo::render::Material::AlphaFunc::GreaterEqual;
+                    m.alphaRef = static_cast<uint8_t>(std::min<uint32_t>(255u, aref + (atst == 6u ? 1u : 0u)));
+                }
+            }
             if (m.textured)
                 m.tex0 = draw.texture->key;
-            const uint32_t colour = 0x80808080u;
-            const Mat view = readMat(ram, camera + 0x130), projection = readMat(ram, camera + 0x170);
-            const Mat clip = readMat(ram, camera + 0x230);
-            for (uint32_t i = 0; i < tiles; ++i)
+
+            Mat world{};
+            world.m[0] = world.m[5] = world.m[10] = scale, world.m[15] = 1.0f;
+            world.m[12] = pos[0], world.m[13] = pos[1], world.m[14] = pos[2];
+            const Mat view4 = readMat(ram, camera + 0x130), projection = readMat(ram, camera + 0x170);
+            const Mat pvw = mul(projection, mul(view4, world)), cw = mul(readMat(ram, camera + 0x230), world);
+            auto colourAt = [&](uint32_t q) {
+                uint32_t c = 0;
+                for (int k = 0; k < 4; ++k)
+                    c |= static_cast<uint32_t>(std::clamp(rf(ram, q + 4u * k), 0.0f, 255.0f)) << (8 * k);
+                return c;
+            };
+
+            if (mode == 2u)
             {
-                Mat world{};
-                world.m[0] = world.m[5] = world.m[10] = world.m[15] = 1.0f;
-                world.m[12] = positions[i][0], world.m[13] = positions[i][1], world.m[14] = positions[i][2];
-                const Mat pvw = mul(projection, mul(view, world)), cw = mul(clip, world);
-                for (uint32_t row = 0; row < rows; ++row)
+                // JC2_WATER_DY: a test offset of the surface's height (y down), to compare with the room's.
+                static const float yOffset = [] {
+                    const char *v = std::getenv("JC2_WATER_DY");
+                    return v ? std::strtof(v, nullptr) : 0.0f;
+                }();
+                for (uint32_t first = 0; first < count; first += batchSize)
                 {
-                    const uint32_t batch = grid + row * strip * 32u;
+                    const uint32_t n = std::min(batchSize, count - first);
                     bozo::render::Vertex v[2];
                     bool ok[2] = {false, false};
-                    for (uint32_t k = 0; k < strip; ++k)
+                    for (uint32_t k = 0; k < n; ++k)
                     {
-                        const uint32_t q = batch + k * 32u;
-                        // JC2_WATER_DY: a test offset of the surface's height (y down), to compare with the room's.
-                        static const float yOffset = [] {
-                            const char *v = std::getenv("JC2_WATER_DY");
-                            return v ? std::strtof(v, nullptr) : 0.0f;
-                        }();
+                        const uint32_t q = buffer + (first + k) * qwords * 16u;
                         const float p[3] = {rf(ram, q + 16), rf(ram, q + 20) + yOffset, rf(ram, q + 24)};
                         float s[3], wq;
                         bozo::render::Vertex out;
                         const bool inside = insideClip(cw, p) && project(pvw, p, s, wq);
                         if (inside)
-                            out.x = s[0], out.y = s[1], out.z = s[2], out.u = rf(ram, q), out.v = rf(ram, q + 4),
-                            out.rgba = colour;
+                        {
+                            out.x = s[0], out.y = s[1], out.z = s[2], out.rgba = 0x80808080u;
+                            uv(rf(ram, q), rf(ram, q + 4), out);
+                        }
                         // A strip: each vertex closes a triangle with the two before it (dropped if one is outside).
                         if (k >= 2 && inside && ok[0] && ok[1])
                             draw.vertices.insert(draw.vertices.end(), {v[0], v[1], out});
@@ -1610,19 +1779,71 @@ namespace jc2
                     }
                 }
             }
-            static const bool traceWater = std::getenv("JC2_TRACE_WATER") != nullptr;
-            if (traceWater)
+            else if (mode == 0x40u)
             {
-                static int traced = 0;
-                if (traced++ < 4)
+                // Path 0x1630: per element (x, y, z, size), colour; a quad flat in x z: p - (s/2, 0, 0), p + (0, 0, s/2),
+                // p - (0, 0, s/2), p + (s/2, 0, 0) with ST (u1, v1), (u1, v0), (u0, v1), (u0, v0); dropped whole when a
+                // corner is outside the clip volume.
+                for (uint32_t i = 0; i < count; ++i)
                 {
-                    float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f, z0 = 1e30f, z1 = -1e30f;
+                    const uint32_t q = buffer + i * 32u;
+                    const float x = rf(ram, q), y = rf(ram, q + 4), z = rf(ram, q + 8), h = rf(ram, q + 12) * 0.5f;
+                    const float corners[4][3] = {{x - h, y, z}, {x, y, z + h}, {x, y, z - h}, {x + h, y, z}};
+                    const float st[4][2] = {{u1, v1}, {u1, v0}, {u0, v1}, {u0, v0}};
+                    const uint32_t c = colourAt(q + 16);
+                    bozo::render::Vertex out[4];
+                    bool ok = true;
+                    for (int k = 0; k < 4 && ok; ++k)
+                    {
+                        float s[3] = {0, 0, 0}, wq = 0;
+                        ok = insideClip(cw, corners[k]) && project(pvw, corners[k], s, wq);
+                        out[k].x = s[0], out[k].y = s[1], out[k].z = s[2], out[k].rgba = c;
+                        uv(st[k][0], st[k][1], out[k]);
+                    }
+                    if (ok)
+                        draw.vertices.insert(draw.vertices.end(), {out[0], out[1], out[2], out[1], out[2], out[3]});
+                }
+            }
+            else
+            {
+                // Path 0x21D8: per element (x, y, half width, half height) in GS coordinates, colour; a screen quad at Z
+                // 0xFFFF: (x - w, y - h) (x + w, y - h) (x - w, y + h) (x + w, y + h) with ST (u0, v0), (u0, v1), (u1, v0),
+                // (u1, v1); the field's y to the frame's.
+                auto f = [](float y) { return 2.0f * y - 2048.0f; };
+                for (uint32_t i = 0; i < count; ++i)
+                {
+                    const uint32_t q = buffer + i * 32u;
+                    const float x = rf(ram, q), y = rf(ram, q + 4), hw = rf(ram, q + 8), hh = rf(ram, q + 12);
+                    const uint32_t c = colourAt(q + 16);
+                    const float corners[4][2] = {{x - hw, y - hh}, {x + hw, y - hh}, {x - hw, y + hh}, {x + hw, y + hh}};
+                    const float st[4][2] = {{u0, v0}, {u0, v1}, {u1, v0}, {u1, v1}};
+                    bozo::render::Vertex out[4];
+                    for (int k = 0; k < 4; ++k)
+                    {
+                        out[k].x = corners[k][0], out[k].y = f(corners[k][1]), out[k].z = 65535.0f, out[k].rgba = c;
+                        uv(st[k][0], st[k][1], out[k]);
+                    }
+                    draw.vertices.insert(draw.vertices.end(), {out[0], out[1], out[2], out[1], out[2], out[3]});
+                }
+            }
+            if (traceProgramD)
+            {
+                static std::set<uint32_t> traced;
+                if (traced.size() < 16 && traced.insert(mode << 8 ^ caller).second)
+                {
+                    float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f;
+                    uint32_t a0 = 255, a1 = 0, ta0 = 255, ta1 = 0;
                     for (const auto &v : draw.vertices)
                         x0 = std::min(x0, v.x), x1 = std::max(x1, v.x), y0 = std::min(y0, v.y), y1 = std::max(y1, v.y),
-                        z0 = std::min(z0, v.z), z1 = std::max(z1, v.z);
-                    std::fprintf(stderr, "[jc2:water] %u tiles, grid %#x %u x %u, texture %s, %zu vertices, x %.0f..%.0f y %.0f..%.0f z %.0f..%.0f\n",
-                                 tiles, grid, columns, rows, draw.texture ? "yes" : "no", draw.vertices.size(), x0, x1, y0,
-                                 y1, z0, z1);
+                        a0 = std::min(a0, v.rgba >> 24), a1 = std::max(a1, v.rgba >> 24);
+                    if (draw.texture)
+                        for (uint32_t t : draw.texture->rgba)
+                            ta0 = std::min(ta0, t >> 24), ta1 = std::max(ta1, t >> 24);
+                    std::fprintf(stderr, "[jc2:programD] mode %#x from %#x: %u elements, record %#x, texture %s, %zu "
+                                         "vertices drawn, depth %d, alpha test %d (%u); x %.0f..%.0f y %.0f..%.0f, vertex "
+                                         "alpha %u..%u, texture alpha %u..%u (%s), uv %.3f..%.3f\n",
+                                 mode, caller, count, record, draw.texture ? "yes" : "no", draw.vertices.size(),
+                                 m.depthTest, m.alphaTest, m.alphaRef, x0, x1, y0, y1, a0, a1, ta0, ta1, source, u0, u1);
                 }
                 if (std::getenv("JC2_WATER_NODEPTH"))
                     m.depthTest = false;
@@ -1797,7 +2018,7 @@ namespace jc2
         r.registerFunction(kShadow, shadow);
         r.registerFunction(kScreenFade, screenFade);
         r.registerFunction(kPrimitiveDrawer, primitiveDrawer);
-        r.registerFunction(kWaterDraw, waterDraw);
+        r.registerFunction(kProgramD, programD);
         r.registerFunction(kDepthOfField, depthOfField);
         r.registerFunction(kRoomDraw, roomDraw);
     }

@@ -693,6 +693,23 @@ Mapped from SLUS_203.09 (`runtime/jc2_debug.cpp`), for testing without playing u
   agrees: program B places the room's vertices with P V W alone (its bit 0x2 only takes the colours from the
   vertices), and no draw of the frame masks depth (every ZBUF is Z32 with ZMSK clear). Walking up from the arrival
   point (pad UP for 150 frames from 24700) the pool beyond the plants shows the water, animated, between its banks.
+- Program D in general (2026-11-24): the water is one user of a generic submitter. The frame's effects task
+  (0x4333B0) calls one routine per bit of the area's effect flags, set per forest and sub-area by 0x433AF0 from the
+  table at 0x64E2F0 (forests 0x19801 = bits 0x1 water, 0x800, 0x1000, 0x8000, 0x10000; area 1 adds 0x400 or 0x100
+  by sub-area; area 4 to 7 0xB800 / 0xB880). Bits 0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x80, 0x400, 0x800, 0x1000, 0x8000
+  draw through 0x4314E0(object, position, texture animation, GS parameters, t0, camera index; f12 scale); 0x40 and
+  0x100 select a fifth program (kind 5, 0x4DFBE0) directly. The object's +0x30 is program D's path (VU 53.x) and
+  sets the batches (0x432170: per mode the vertices a batch and qwords a vertex). The GS parameters are three A+D
+  pairs: ALPHA (FIX in its high word), TEXA, TEST. The port now overrides 0x4314E0 itself and draws mode 2 (the
+  water's strips), 0x40 (path 0x1630: (x, y, z, size) + colour, a quad flat in x z, corners at +-size/2 on x and z)
+  and 0x400 (path 0x21D8: (x, y, half width, half height) in GS coordinates + colour, a screen quad at Z 0xFFFF)
+  with ALPHA, the alpha test and the depth test from the parameters; other modes are listed once.
+- Effect textures are the open part: the records are the effects' own (not in the banks). The water's is found by
+  its IPU object; the Wind Forest's light spots (mode 0x40, record built by 0x22D7D8) sample page 0x3800, the water
+  animation's page, with no IPU playing there; its sparkles (mode 0x400) use picture 0 of a TIM2 the effect keeps
+  (0x89DD00: record, TIM2), but matching a record to a loaded TIM2 by format and size is ambiguous (five candidates
+  in that forest), so it is used only when unique. Both stay undrawn for now. The way out: follow the game's own
+  uploads (which picture went to which page and CLUT) instead of guessing from the record.
 - Engine master since this merge answers the IPU's registers as an idle decoder (libs/io.cpp), so without the native
   player the game would no longer stop there: it would run on with frames never written.
 - Testing gotcha: `timeout` (msys) and `scripts/bench_run.sh` lose variables set in front of them (JC2_TRACE_*): put
