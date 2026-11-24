@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <vector>
 #ifdef JC2_WITH_WINDOW
@@ -52,6 +53,19 @@ namespace jc2
         constexpr uint32_t kEnemyGroup = 0x0089B028u; // the enemies the battle reads (an event battle: 0x5857D0 + 0x30 id)
         constexpr int kModeTitle = 0, kModeGame = 2, kModeBattle = 3;
 
+        // The story (docs/RECOMP_NOTES.md "Story state"): halfwords and flag words of the game's block at 0x8785F0.
+        constexpr uint32_t kChapter = 0x008788DCu;    // 3 at New game, 4 after the hatching, 5 at the Arena lesson
+        constexpr uint32_t kStoryFlags = 0x008788E0u; // 96 flags (0x1F4AE0 sets one)
+        constexpr int kStoryFlagCount = 96;
+        constexpr uint32_t kSceneDone = 0x008788ECu;  // a bit per scene, set as its event is played (0x1F4B20)
+        constexpr uint32_t kForestStage = 0x00878612u; // a forest's stage (0x1A1050 copies it from the next one)
+        constexpr uint32_t kForestStageNext = 0x00878614u;
+        [[maybe_unused]] constexpr uint32_t kArea = 0x008788D2u;       // the effects' area and sub-area (0x433AF0)
+        [[maybe_unused]] constexpr uint32_t kSubArea = 0x008788D6u;
+        constexpr uint32_t kSceneAreas = 0x005A92A0u; // 28 bytes: +0 a scene, +0x16 its area (0x1EAD60); -1 ends
+        constexpr uint32_t kStageSubAreas = 0x005CA340u; // per area a table of 36 words: stage -> sub-area (0x205110)
+        constexpr int kStageCount = 36;
+
         const uint8_t *g_ram = nullptr;
         std::atomic<int> g_battle{-1}; // the opponent to fight from the next frame wait
         std::atomic<uint64_t> g_battleAt{0};
@@ -60,6 +74,16 @@ namespace jc2
         std::atomic<int> g_request{-1};   // the scene to ask for at the next frame's end
         std::atomic<uint64_t> g_requestAt{0}; // not before this frame
         std::function<void(const std::string &)> g_message;
+
+        // Story edits asked for (options, F2 > Story), made by the game's thread at a frame's end once a scene runs.
+        struct StoryEdit
+        {
+            enum Kind { Chapter, Flag, SceneDone, Stage, SubArea } kind;
+            int value;
+            bool set;
+        };
+        std::mutex g_storyLock;
+        std::vector<StoryEdit> g_story;
 
         uint32_t r32(const uint8_t *ram, uint32_t a)
         {
@@ -196,11 +220,118 @@ namespace jc2
         g_request = scene;
     }
 
+    // --chapter, --story-flag, --scene-done, --forest-stage, --subarea and F2 > Story.
+    void requestStory(int kind, int value, bool set)
+    {
+        std::lock_guard<std::mutex> lock(g_storyLock);
+        g_story.push_back({StoryEdit::Kind(kind), value, set});
+    }
+
+    namespace
+    {
+        void w16(uint8_t *ram, uint32_t a, int16_t v) { std::memcpy(ram + a, &v, 2); }
+        [[maybe_unused]] bool flag(const uint8_t *ram, uint32_t base, int n) { return r32(ram, base + 4u * uint32_t(n >> 5)) >> (n & 31) & 1u; }
+        void setFlag(uint8_t *ram, uint32_t base, int n, bool on)
+        {
+            const uint32_t a = base + 4u * uint32_t(n >> 5), bit = 1u << (n & 31);
+            w32(ram, a, on ? r32(ram, a) | bit : r32(ram, a) & ~bit);
+        }
+
+        // A scene's area (0x1EAD60): the forests 0-3 Water, Fire, Wind, Earth; 4-7 their dark sides; 10 the town.
+        int sceneArea(const uint8_t *ram, int scene)
+        {
+            for (uint32_t e = kSceneAreas; e < kSceneAreas + 0x1Cu * 2000u; e += 0x1Cu)
+            {
+                const int s = r16(ram, e);
+                if (s == -1)
+                    break;
+                if (s == scene)
+                    return int8_t(ram[e + 0x16]);
+            }
+            return -1;
+        }
+
+        // The stage that gives a forest area this sub-area (the first in its table), -1 if none does.
+        int stageFor(const uint8_t *ram, int area, int subArea)
+        {
+            if (area < 0 || area > 9)
+                return -1;
+            const uint32_t table = r32(ram, kStageSubAreas + 4u * uint32_t(area));
+            if (table < 0x100000u || table >= 0x2000000u)
+                return -1;
+            for (int stage = 0; stage < kStageCount; ++stage)
+                if (int(r32(ram, table + 4u * uint32_t(stage))) == subArea)
+                    return stage;
+            return -1;
+        }
+
+        int g_subArea = -1; // --subarea: kept for the next forest entered (the stage depends on its area)
+
+        void say(const std::string &message)
+        {
+            std::printf("[jc2:debug] frame %llu: %s\n", (unsigned long long)g_frame.load(), message.c_str());
+            if (g_message)
+                g_message(message);
+        }
+
+        void setStage(uint8_t *ram, int value)
+        {
+            w16(ram, kForestStage, int16_t(value));
+            w16(ram, kForestStageNext, int16_t(value));
+        }
+
+        // The story edits, once the game is in a scene (New game clears the block, 0x1E5A80, before its first one).
+        void applyStory(uint8_t *ram)
+        {
+            const uint32_t s = modeBytes(ram);
+            if (!s || ram[s] != kModeGame || r16(ram, kSceneCurrent) < 0)
+                return;
+            std::vector<StoryEdit> edits;
+            {
+                std::lock_guard<std::mutex> lock(g_storyLock);
+                edits.swap(g_story);
+            }
+            for (const StoryEdit &e : edits)
+                switch (e.kind)
+                {
+                case StoryEdit::Chapter:
+                    say("Story: chapter " + std::to_string(r16(ram, kChapter)) + " -> " + std::to_string(e.value));
+                    w16(ram, kChapter, int16_t(e.value));
+                    break;
+                case StoryEdit::Flag:
+                    if (e.value >= 0 && e.value < kStoryFlagCount)
+                    {
+                        setFlag(ram, kStoryFlags, e.value, e.set);
+                        say("Story: flag " + std::to_string(e.value) + (e.set ? " set" : " cleared"));
+                    }
+                    break;
+                case StoryEdit::SceneDone:
+                    if (e.value >= 0 && e.value < kSceneCount)
+                    {
+                        setFlag(ram, kSceneDone, e.value, e.set);
+                        say("Story: scene " + sceneLabel(e.value) + (e.set ? " done" : " not done"));
+                    }
+                    break;
+                case StoryEdit::Stage:
+                    setStage(ram, e.value);
+                    say("Story: forest stage " + std::to_string(e.value) + " (taken as a forest is entered)");
+                    break;
+                case StoryEdit::SubArea:
+                    g_subArea = e.value;
+                    // Not going anywhere: enter the forest the game is in again, to take it.
+                    if (g_request.load() < 0 && r16(ram, kSceneCurrent) < 10)
+                        requestScene(r16(ram, kSceneCurrent), 0);
+                    break;
+                }
+        }
+    }
+
     // At each game frame's end (the EE thread, the game waiting for its frame).
     void debugFrame(uint8_t *ram, uint64_t frame)
     {
         g_ram = ram;
         g_frame = frame;
+        applyStory(ram);
     }
 
     // An event scene's step (0x1E7B90(scene)), each frame while it runs: scene +6 is its state (1 the script runs, 3
@@ -228,6 +359,21 @@ namespace jc2
                     g_message(message);
                 rt->functions.generated(kSceneStep)(ram, ctx, rt);
                 return;
+            }
+            // --subarea: the stage giving it in the forest entered (the forest's entry 0x22B770 reads its sub-area
+            // from its area's table at that stage, 0x205110).
+            if (g_subArea >= 0 && target < 10)
+            {
+                const int area = sceneArea(ram, target), st = stageFor(ram, area, g_subArea);
+                if (st >= 0)
+                {
+                    setStage(ram, st);
+                    say("Story: sub-area " + std::to_string(g_subArea) + " of area " + std::to_string(area) +
+                        " is forest stage " + std::to_string(st));
+                }
+                else
+                    say("Story: area " + std::to_string(area) + " has no sub-area " + std::to_string(g_subArea));
+                g_subArea = -1;
             }
             const int16_t next = int16_t(target), leaving = 3;
             std::memcpy(ram + kSceneNext, &next, 2);
@@ -379,6 +525,51 @@ namespace jc2
             }
             ImGui::TextDisabled("The battle starts from a field scene (not the title) and plays as a hunter's does,\n"
                                 "going back to the scene after. Event battles' scripts (dialogue, tutorials) do not run.");
+        });
+        // F2 > Story: the chapter, the story flags, the scenes played and the forests' stage, read and set.
+        bozo::app::ui::registerTab("Story", []
+        {
+            if (!g_ram)
+                return;
+            const int current = r16(g_ram, kSceneCurrent);
+            ImGui::Text("Chapter %d   forest stage %d (next %d)   effects area %d sub-area %d", r16(g_ram, kChapter),
+                        r16(g_ram, kForestStage), r16(g_ram, kForestStageNext), r16(g_ram, kArea), r16(g_ram, kSubArea));
+            static int chapter = 5, stageValue = 0, subArea = 8;
+            ImGui::SetNextItemWidth(100);
+            ImGui::InputInt("##chapter", &chapter);
+            ImGui::SameLine();
+            if (ImGui::Button("Set chapter"))
+                requestStory(StoryEdit::Chapter, chapter, true);
+            ImGui::SetNextItemWidth(100);
+            ImGui::InputInt("##stage", &stageValue);
+            ImGui::SameLine();
+            if (ImGui::Button("Set forest stage"))
+                requestStory(StoryEdit::Stage, stageValue, true);
+            ImGui::SetNextItemWidth(100);
+            ImGui::InputInt("##subarea", &subArea);
+            ImGui::SameLine();
+            if (ImGui::Button("Enter forest at sub-area"))
+                requestStory(StoryEdit::SubArea, subArea, true);
+            if (current >= 0 && current < kSceneCount)
+            {
+                bool done = flag(g_ram, kSceneDone, current);
+                if (ImGui::Checkbox(("Scene " + sceneLabel(current) + " played").c_str(), &done))
+                    requestStory(StoryEdit::SceneDone, current, done);
+            }
+            ImGui::Separator();
+            ImGui::TextUnformatted("Story flags");
+            for (int i = 0; i < kStoryFlagCount; ++i)
+            {
+                bool on = flag(g_ram, kStoryFlags, i);
+                if (i % 12)
+                    ImGui::SameLine();
+                if (ImGui::Checkbox(("##f" + std::to_string(i)).c_str(), &on))
+                    requestStory(StoryEdit::Flag, i, on);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("flag %d", i);
+            }
+            ImGui::TextDisabled("The scenes' scripts choose their events by chapter and by these flags. A forest takes\n"
+                                "its stage (which picks its sub-area, its effects) as it is entered.");
         });
 #endif
     }

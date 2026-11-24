@@ -6,6 +6,7 @@
 #include "bozo/libs/libraries.h"
 #include "bozo/port.h"
 #include "jc2_functions.h"
+#include <array>
 #include <algorithm>
 #include <functional>
 #include <cstdio>
@@ -47,6 +48,7 @@ namespace jc2
     void installIpu(bozo::port::Registry &);
     void requestBattle(int opponent, uint64_t atFrame, bool group);
     void debugFrame(uint8_t *ram, uint64_t frame);
+    void requestStory(int kind, int value, bool set); // 0 chapter, 1 story flag, 2 scene played, 3 forest stage, 4 sub-area
     // Save states: JC2's part (jc2_port.cpp, jc2_audio.cpp, jc2_meshes.cpp, jc2_2d.cpp).
     void portState(bozo::state::Archive &, Runtime &);
     void audioState(bozo::state::Archive &);
@@ -83,6 +85,7 @@ static int run(int argc, char **argv)
     int battle = -1;         // --battle: fight this opponent (jc2_debug.cpp), at --battle-at's frame
     uint64_t battleAt = 0;
     bool battleGroup = false; // --battle-group: N is a battle group (the game's 2000), not a hunter
+    std::vector<std::array<int, 3>> story; // --chapter, --story-flag, --scene-done, --forest-stage, --subarea
     std::string dumpRam; // EE RAM at the end of the run (a fault, the frame limit): the boundary to analyse offline
     for (int i = 1; i < argc; ++i)
     {
@@ -123,6 +126,16 @@ static int run(int argc, char **argv)
             battle = std::stoi(argv[++i]), battleGroup = true;
         else if (a == "--battle-at" && i + 1 < argc)
             battleAt = std::stoull(argv[++i]);
+        else if (a == "--chapter" && i + 1 < argc)
+            story.push_back({0, std::stoi(argv[++i]), 1});
+        else if ((a == "--story-flag" || a == "--clear-story-flag") && i + 1 < argc)
+            story.push_back({1, std::stoi(argv[++i]), a == "--story-flag"});
+        else if ((a == "--scene-done" || a == "--scene-not-done") && i + 1 < argc)
+            story.push_back({2, std::stoi(argv[++i]), a == "--scene-done"});
+        else if (a == "--forest-stage" && i + 1 < argc)
+            story.push_back({3, std::stoi(argv[++i]), 1});
+        else if (a == "--subarea" && i + 1 < argc)
+            story.push_back({4, std::stoi(argv[++i]), 1});
         else if (a == "--headless")
             window = false;
 #ifdef JC2_WITH_WINDOW
@@ -150,6 +163,8 @@ static int run(int argc, char **argv)
                                  "                    [--iso FILE] [--out FILE] [--dump-ram FILE] [--profile-io]\n"
                                  "                    [--load-state FILE [--load-state-at FRAME]] [--save-state FILE --save-state-at FRAME]\n"
                                  "                    [--scene N [--scene-at FRAME]] [--battle N | --battle-group N [--battle-at FRAME]]\n"
+                                 "                    story: [--chapter N] [--story-flag N] [--clear-story-flag N] [--scene-done N]\n"
+                                 "                           [--scene-not-done N] [--forest-stage N] [--subarea N]\n"
                                  "                    window: [--hidden (silent too)] [--mute] [--capture-dir DIR --capture-frame N ...] [--quit-after N]\n");
             return a == "--help" ? 0 : 2;
         }
@@ -215,6 +230,8 @@ static int run(int argc, char **argv)
         jc2::requestScene(scene, sceneAt);
     if (battle >= 0)
         jc2::requestBattle(battle, battleAt, battleGroup);
+    for (const auto &e : story)
+        jc2::requestStory(e[0], e[1], e[2] != 0);
     bozo::audio::WavWriter recording;
     if (!wav.empty() && !recording.open(wav))
     {

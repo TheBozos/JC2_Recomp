@@ -40,7 +40,7 @@ a time. Windows comes first, then Linux.
 | Battles drawn (stage, monsters, effects) | ✅ |
 | Animated IPU textures decoded natively (D001's water) | ✅ |
 | Forest and town effects (VU1 program D: water, fireflies, dust, motes), textures from the game's own uploads | 🔧 |
-| Debug teleport (`--scene`, field scenes) and battle launcher (`--battle`, `--battle-group`): battles play | ✅ |
+| Debug teleport (`--scene`, field scenes), battle launcher (`--battle`, `--battle-group`), story state (`--chapter`, `--subarea`...) | ✅ |
 | Memory card saves | ⏳ |
 | Linux build | ⏳ |
 | Widescreen, higher internal resolution | ⏳ |
@@ -110,7 +110,8 @@ build/bozo_game/jc2                                          # the game window
 build/bozo_game/jc2-headless --frames 600                    # no window (checks, scripted runs)
 ```
 
-`--help` lists the options: save states (`--load-state`, `--save-state`), teleport (`--scene N`), the battle launcher
+`--help` lists the options: save states (`--load-state`, `--save-state`), teleport (`--scene N`), the story (`--chapter`,
+`--story-flag`, `--scene-done`, `--forest-stage`, `--subarea`), the battle launcher
 (`--battle N`), hidden-window captures (`--hidden`, silent too) and `--mute`.
 
 ### Windows

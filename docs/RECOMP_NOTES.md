@@ -614,6 +614,29 @@ Mapped from SLUS_203.09 (`runtime/jc2_debug.cpp`), for testing without playing u
   rewritten on any runtime edit, which recompiled every overlay batch (~30 min at -j 4). It is now copied only when it
   changes (copy_if_different + Ninja restat); a new override still recompiles everything, as it must.
 
+## Story state (2026-11-24)
+
+Where the story's progress lives, found by diffing save states taken in story order (s12950 to s26200), and the
+options that set it (`runtime/jc2_debug.cpp`), to reach later content without playing:
+- **Chapter**: halfword 0x8788DC (0x1F3F10 reads, 0x1F3F30 writes, called from the event overlays). 3 at New game, 4
+  after the hatching, 5 at the Arena lesson. The scenes' scripts pick their events by chapter ranges ({min, max}
+  compared at 0x1EA8F0).
+- **Story flags**: 96 bits at 0x8788E0 (block 0x8785F0 + 0x2F0; 0x1F4AE0 sets one). Flag 22 and flag 82 appear
+  after the hatching.
+- **Scenes played**: a bit per scene at 0x8788EC (+0x2FC, 38 words), set by 0x1F4B20 (its argument, or the current
+  scene when negative). The states show 38, 42-45, 49 and 51 set as they were played.
+- **Forest stage**: halfword 0x878612, copied from 0x878614 by the scene task (0x1A1050) as a scene starts; the
+  scene change sets 0x878614 (0x1E5400; reset to 0 for a town scene, 0x1E7668). A forest's entry (0x22B770) takes
+  its sub-area from 0x205110: the word at stage of the area's table (0x5CA340 + 4 area, 36 words). Areas come from
+  the scene list at 0x5A92A0 (28 bytes: +0 scene, +0x16 area; 0x1EAD60): WIND 2, AQUA 0, FIRE 1, TERA 3, the dark
+  forests 4-7, 8 DLLTH, 9 TUTO, 10 the town. The effects read the area and sub-area at 0x8788D2 and 0x8788D6
+  (0x43DD50 -> 0x433AF0).
+- **Use**: `--chapter N`, `--story-flag N` / `--clear-story-flag N`, `--scene-done N` / `--scene-not-done N`,
+  `--forest-stage N`, `--subarea N` (the stage giving that sub-area in the next forest entered, with `--scene`, or the
+  current forest entered again). They are applied at the first frame the game is in a scene (after New game clears
+  the block). F2 > Story shows and sets them. Verified: from s25000 (Wind forest, chapter 4), `--chapter 6
+  --subarea 8 --scene 2` enters the Fire forest at stage 3, area 1 sub-area 8 ("Fire Spy 4"), drawn.
+
 ## Battles drawn (2026-11-23)
 
 - **Battle stage**: the arena's models are single sub-files the game copies out of loaded resources (1737's pads to
