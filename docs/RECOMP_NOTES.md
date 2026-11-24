@@ -674,6 +674,14 @@ Mapped from SLUS_203.09 (`runtime/jc2_debug.cpp`), for testing without playing u
   now refuses those ("not a field scene"; kinds 0, the forests, and 1 have it: 574). The other 3 are stubs or
   unused: CE20's module is 0x140 bytes (two functions) and its table entry points past it (0x940140), U123 and U559
   read garbage. No new program D mode, no model or texture not found in the 25 that ran.
+- The hatching's light burst (s16200_hatch, Cross every 80 frames; frame 17000): as the flash fades the screen shows
+  three vertical bands (the left third bright, the middle grey, the right ~10 px uncovered). Not the fade (JC2_FADE=0
+  the same) nor the effect sprite (one camera-facing additive quad from 0x4136F0): resource 3889's additive (ALPHA
+  0x48), unlit parts, above all 0xDC6850, drawn twice, colour alpha 0.22, UV 0.4..0.6 of its 64 x 64 glow (bank 0
+  slot 0 picture 4), its triangles far past the screen (GS x 1119..3001). The bands' edges fall inside it: likely
+  how its huge triangles are cut at the view volume (program B is drawn cut, not dropped), to check against the
+  console or program B's clipping path. JC2_TRACE_DRAWS now also prints each part's texture, bank / slot / picture
+  and UV range.
 
 ## IPU animations (2026-11-23)
 

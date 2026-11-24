@@ -1050,10 +1050,35 @@ namespace jc2
                     }
                 }
                 std::printf("[jc2:draw] %s res %u chain %#x flags %#x prim %#llx alpha %#llx colour a %.2f tris %zu "
-                            "screen %.0f..%.0f x %.0f..%.0f behind %u%s\n",
+                            "screen %.0f..%.0f x %.0f..%.0f behind %u%s; texture %s %ux%u, bank %u slot %u index %u, "
+                            "uv %.2f..%.2f x %.2f..%.2f\n",
                             skinned ? "skinned" : "static", resource, chain, material.flags,
                             (unsigned long long)material.prim, (unsigned long long)material.alpha, material.colour[3],
-                            draw.batches[0].vertices.size() / 3, x0, x1, y0, y1, behind, cull ? " cull" : "");
+                            draw.batches[0].vertices.size() / 3, x0, x1, y0, y1, behind, cull ? " cull" : "",
+                            draw.batches[0].texture ? "yes" : "no",
+                            draw.batches[0].texture ? draw.batches[0].texture->width : 0u,
+                            draw.batches[0].texture ? draw.batches[0].texture->height : 0u, material.bytes[0xC],
+                            material.bytes[0xD], unsigned(material.bytes[0xE] | material.bytes[0xF] << 8),
+                            [&] {
+                                float m = 1e30f;
+                                for (const auto &v : draw.batches[0].vertices) m = std::min(m, v.u);
+                                return m;
+                            }(),
+                            [&] {
+                                float m = -1e30f;
+                                for (const auto &v : draw.batches[0].vertices) m = std::max(m, v.u);
+                                return m;
+                            }(),
+                            [&] {
+                                float m = 1e30f;
+                                for (const auto &v : draw.batches[0].vertices) m = std::min(m, v.v);
+                                return m;
+                            }(),
+                            [&] {
+                                float m = -1e30f;
+                                for (const auto &v : draw.batches[0].vertices) m = std::max(m, v.v);
+                                return m;
+                            }());
                 // JC2_TRACE_AREA=x0,z0,x1,z1: the world heights of this part's vertices over that area (static only).
                 static const char *area = std::getenv("JC2_TRACE_AREA");
                 float ax0, az0, ax1, az1;

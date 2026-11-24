@@ -38,8 +38,9 @@ a time. Windows comes first, then Linux.
 | Movies, title screen, main menu | ✅ |
 | New game: opening movie, first scenes and dialogue, the Jade Throne Room, the forests | ✅ |
 | Battles drawn (stage, monsters, effects) | ✅ |
-| Animated IPU textures decoded natively | 🔧 |
-| Battles playable from the debug launcher | 🔧 |
+| Animated IPU textures decoded natively (D001's water) | ✅ |
+| Forest and town effects (VU1 program D: water, fireflies, dust, motes), textures from the game's own uploads | 🔧 |
+| Debug teleport (`--scene`, field scenes) and battle launcher (`--battle`, `--battle-group`): battles play | ✅ |
 | Memory card saves | ⏳ |
 | Linux build | ⏳ |
 | Widescreen, higher internal resolution | ⏳ |
