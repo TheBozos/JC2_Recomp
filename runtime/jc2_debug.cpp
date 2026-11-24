@@ -143,21 +143,17 @@ namespace jc2
         g_battle = -1;
         const bool group = g_battleGroup.load();
         const uint32_t party = group ? kGroups + 0x30u * uint32_t(opponent) : kOpponents + 0x94u * uint32_t(opponent) + 0x30u;
+        // Kind 3, a hunter's battle (the field's encounter, 0x221B14), for a group too: an event script's battle (kind
+        // 7, the Arena lesson's command 0x1C) waits at its start for that script to run it (no command menu, nothing
+        // moves), while a kind 3 battle runs by itself and goes back to the scene. A group has a party record's layout.
         ram[kBattleKind - 1] = 0xFF;
-        ram[kBattleKind] = group ? 7 : 3; // an event script's battle (the Arena lesson's command 0x1C: 7) / a hunter's
+        ram[kBattleKind] = 3;
         ram[kBattleKind + 1] = ram[kBattleKind + 2] = 0;
         w32(ram, kEnemyGroup, party);
         w32(ram, kBattleKind - 1 + 8, 0);
-        w32(ram, kBattleKind - 1 + 0xC, group ? 3 : 1);
+        w32(ram, kBattleKind - 1 + 0xC, 1);
         w32(ram, kBattleKind - 1 + 0x10, 0xFFFFFFFFu);
-        if (group)
-        {
-            // As the lesson's battle leaves the scene (JC2_TRACE_BATTLE): the stage word 0; the group also in the
-            // scene's script context (+0x20), which the context at 0x89B010 is copied from before the exit
-            // (0x1E5100): written only at 0x89B028, the group was 0 again when 0x286260 read it.
-            w32(ram, kBattleKind - 1 + 4, 0);
-            w32(ram, scene + 0x20, party);
-        }
+        w32(ram, scene + 0x20, party); // the scene's script context, copied to 0x89B010.. by the step (0x1E5100)
         // The forest hunter encounter's setup too (0x221B14): the party, -1, 0, 0.
         w32(ram, kBattleSetup + 8, party);
         w32(ram, kBattleSetup + 4, 0xFFFFFFFFu);
@@ -368,8 +364,8 @@ namespace jc2
                 }
                 ImGui::EndListBox();
             }
-            ImGui::TextDisabled("Experimental: the battle starts, but without the battle script behind it the enemies\n"
-                                "are defaults and it waits. For a real battle: the Arena (scene 50, menu Arena).");
+            ImGui::TextDisabled("The battle starts from a field scene (not the title) and plays as a hunter's does,\n"
+                                "going back to the scene after. Event battles' scripts (dialogue, tutorials) do not run.");
         });
 #endif
     }

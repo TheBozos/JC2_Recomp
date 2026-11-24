@@ -662,6 +662,12 @@ Mapped from SLUS_203.09 (`runtime/jc2_debug.cpp`), for testing without playing u
     battle now has its group's enemies (215: the lesson's Rook and its minion; 145, "eM2ARENA_BATTLE_LV2_3": its
     three monsters). It still does not start: no command menu, nothing moves with Cross presses (40 s), the same with
     the lesson's script context (2, 2, -2, 0x45, 1) copied in. Next: the battle task's own state, where it waits.
+  - Playable (2026-11-24): kind 3 battles run by themselves. `--battle 19` (Garon) from s25000_wind_forest_tamatoch
+    plays (attacks, effects) and goes back to the Wind Forest; a kind 7 battle is an event script's (the scenes'
+    scripts are the m2es* overlays), which drives it from its start: launched without it, it waits. So
+    --battle-group now launches a kind 3 battle with the group as the party (the same record layout): group 145
+    ("eM2ARENA_BATTLE_LV2_3") from the Arena hub plays (the enemies act, their effects, "No Divine Beasts." when the
+    partner falls). The tutorials' and events' battle scripts (dialogue, scripted turns) do not run that way.
 
 ## IPU animations (2026-11-23)
 
