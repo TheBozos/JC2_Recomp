@@ -868,3 +868,11 @@ fifth VU1 program (kind 5: microcode 0x4DFBF0, 107 pairs, uploaded by 0x1FB330).
   state's. And state::Archive::end closed a section before checking its size: a reader trying an older layout
   (the libraries' sif section) that failed there rewound into a nameless section and the load failed further on.
   Both with tests (bozo-libs-tests, bozo-state-tests).
+
+## Playing on after the Arena lesson (2026-11-24)
+
+- From s26200_arena_lesson, Cross every 70 frames plays the lesson's battles through (formations, Earth beasts,
+  Poison Haze, the capture effect); state s33600_after_lesson keeps the end. The next battle (a hunter's, from about
+  frame 37,200) takes commands: Right opens Kahu's ring (Burn Hit, Medina, Give up...), Cross picks; Cross alone
+  picks Summon ("No Divine Beasts"). Right + Cross every 250 frames plays it to frame 43,900 with no port fault.
+- A text box seen empty for one frame (42,400) is the box closing after Cross, not missing text.
