@@ -723,6 +723,13 @@ Mapped from SLUS_203.09 (`runtime/jc2_debug.cpp`), for testing without playing u
   in the run (a state saved before the upload map existed has none: the effects started before it stay undrawn).
   The light spots' page 0x3800 gets no upload in the Wind Forest: still undrawn. JC2_TRACE_UPLOADS=1 lists the
   chains and transfers, JC2_DUMP_EFFECT_TEXTURES=dir writes each effect texture once.
+- Forest survey (Throne Room state, --scene 0..9, 440 frames each): Wind 0x400 (dust) and 0x40 (light spots, no
+  texture); Water and Fire 0x2 (water); Lilith's Nest 0x20 and 0x80; Earth, the dark forests and the tutorial none
+  in that time. Translated next: path 0x1240 (mode 0x20: (x, y, z, size), colour, (cos, sin); a camera-facing quad
+  on VU 28 = the view's y row negated and VU 27 x it (VU 27 its z row), turned on screen about its centre with y
+  stretched by 2.14393 for the turn) and path 0x1C30 (mode 0x80: colour, a direction t, (x, y, z, width); a ribbon,
+  p +- (VU 27 x t) width, one strip a batch). Lilith's Nest's fireflies: spinning sparks (0x20) with ribbon trails
+  (0x80), additive (ALPHA 0x48: Cs As + Cd), fading in after arrival.
 - Engine master since this merge answers the IPU's registers as an idle decoder (libs/io.cpp), so without the native
   player the game would no longer stop there: it would run on with frames never written.
 - Testing gotcha: `timeout` (msys) and `scripts/bench_run.sh` lose variables set in front of them (JC2_TRACE_*): put

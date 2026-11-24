@@ -2080,7 +2080,8 @@ namespace jc2
             uint32_t batchSize = 0, qwords = 0;
             const bool known = programDShape(mode, ram, object, batchSize, qwords);
             // Native: modes 2 (strips: the water), 0x40 (world quads) and 0x400 (screen quads). Others are listed once.
-            const bool native = known && batchSize && (mode == 2u || mode == 0x40u || mode == 0x400u);
+            const bool native =
+                known && batchSize && (mode == 2u || mode == 0x20u || mode == 0x40u || mode == 0x80u || mode == 0x400u);
             auto notDrawn = [&](const char *why) {
                 static std::set<uint64_t> seen;
                 if (seen.size() < 64 && seen.insert(uint64_t(mode) << 32 | caller).second)
@@ -2212,6 +2213,96 @@ namespace jc2
                             draw.vertices.insert(draw.vertices.end(), {v[0], v[1], out});
                         v[0] = v[1], ok[0] = ok[1];
                         v[1] = out, ok[1] = inside;
+                    }
+                }
+            }
+            else if (mode == 0x20u)
+            {
+                // Path 0x1240: per element (x, y, z, size), colour, (cos, sin); a camera-facing quad, p -+ a s -+ b s
+                // with a = VU 28 (the view's y row, negated), b = VU 27 x a (VU 27: its z row), turned on screen about
+                // its centre by the angle (in the field: y stretched by 2.14393 for the turn, then back); ST as path
+                // 0x1630; dropped whole when a corner is outside the clip volume.
+                const float az[3] = {view4.m[2], view4.m[6], view4.m[10]};
+                const float a[3] = {-view4.m[1], -view4.m[5], -view4.m[9]};
+                const float b[3] = {az[1] * a[2] - az[2] * a[1], az[2] * a[0] - az[0] * a[2], az[0] * a[1] - az[1] * a[0]};
+                const float st[4][2] = {{u1, v1}, {u1, v0}, {u0, v1}, {u0, v0}};
+                for (uint32_t i = 0; i < count; ++i)
+                {
+                    const uint32_t q = buffer + i * 48u;
+                    const float p[3] = {rf(ram, q), rf(ram, q + 4), rf(ram, q + 8)}, s = rf(ram, q + 12);
+                    const float c = rf(ram, q + 32), sn = rf(ram, q + 36);
+                    const uint32_t col = colourAt(q + 16);
+                    // Corners 15, 16, 19, 20: -a -b, +a -b, -a +b, +a +b.
+                    const float sa[4] = {-1, 1, -1, 1}, sb[4] = {-1, -1, 1, 1};
+                    float scr[4][3];
+                    bool ok = true;
+                    for (int k = 0; k < 4 && ok; ++k)
+                    {
+                        float w4[3];
+                        for (int d = 0; d < 3; ++d)
+                            w4[d] = p[d] + sa[k] * a[d] * s + sb[k] * b[d] * s;
+                        float wq = 0;
+                        ok = insideClip(cw, w4) && project(pvw, w4, scr[k], wq);
+                        if (ok)
+                            scr[k][1] = (scr[k][1] + 2048.0f) * 0.5f; // the frame's y back to the field's
+                    }
+                    if (!ok)
+                        continue;
+                    const float cx = (scr[1][0] + scr[2][0]) * 0.5f, cy = (scr[1][1] + scr[2][1]) * 0.5f;
+                    auto turn = [&](const float *v, float out[2]) {
+                        const float x = v[0] - cx, y = (v[1] - cy) * 2.14393f;
+                        out[0] = x * sn - y * c, out[1] = (x * c + y * sn) * 0.466434f;
+                    };
+                    float r0[2], r1[2];
+                    turn(scr[0], r0), turn(scr[1], r1);
+                    const float xy[4][2] = {{cx + r0[0], cy + r0[1]}, {cx + r1[0], cy + r1[1]}, {cx - r1[0], cy - r1[1]},
+                                            {cx - r0[0], cy - r0[1]}};
+                    bozo::render::Vertex out[4];
+                    for (int k = 0; k < 4; ++k)
+                    {
+                        out[k].x = xy[k][0], out[k].y = 2.0f * xy[k][1] - 2048.0f, out[k].z = scr[k][2], out[k].rgba = col;
+                        uv(st[k][0], st[k][1], out[k]);
+                    }
+                    draw.vertices.insert(draw.vertices.end(), {out[0], out[1], out[2], out[1], out[2], out[3]});
+                }
+            }
+            else if (mode == 0x80u)
+            {
+                // Path 0x1C30: per element colour, a direction t, (x, y, z, width); a ribbon, two vertices an element:
+                // p + d with ST (u0, v0), p - d with (u1, v0), d = (VU 27 x t) width (VU 27: the view's z row); one
+                // strip a batch, a vertex outside the clip volume closing no triangle.
+                const float az[3] = {view4.m[2], view4.m[6], view4.m[10]};
+                for (uint32_t first = 0; first < count; first += batchSize)
+                {
+                    const uint32_t n = std::min(batchSize, count - first);
+                    bozo::render::Vertex v[2];
+                    bool ok[2] = {false, false};
+                    uint32_t k = 0;
+                    for (uint32_t e = 0; e < n; ++e)
+                    {
+                        const uint32_t q = buffer + (first + e) * 48u;
+                        const uint32_t col = colourAt(q);
+                        const float t[3] = {rf(ram, q + 16), rf(ram, q + 20), rf(ram, q + 24)};
+                        const float p[3] = {rf(ram, q + 32), rf(ram, q + 36), rf(ram, q + 40)}, w = rf(ram, q + 44);
+                        const float d[3] = {(az[1] * t[2] - az[2] * t[1]) * w, (az[2] * t[0] - az[0] * t[2]) * w,
+                                            (az[0] * t[1] - az[1] * t[0]) * w};
+                        for (int side = 0; side < 2; ++side, ++k)
+                        {
+                            const float sgn = side ? -1.0f : 1.0f;
+                            const float pt[3] = {p[0] + sgn * d[0], p[1] + sgn * d[1], p[2] + sgn * d[2]};
+                            float s[3] = {0, 0, 0}, wq = 0;
+                            bozo::render::Vertex out;
+                            const bool inside = insideClip(cw, pt) && project(pvw, pt, s, wq);
+                            if (inside)
+                            {
+                                out.x = s[0], out.y = s[1], out.z = s[2], out.rgba = col;
+                                uv(side ? u1 : u0, v0, out);
+                            }
+                            if (k >= 2 && inside && ok[0] && ok[1])
+                                draw.vertices.insert(draw.vertices.end(), {v[0], v[1], out});
+                            v[0] = v[1], ok[0] = ok[1];
+                            v[1] = out, ok[1] = inside;
+                        }
                     }
                 }
             }
