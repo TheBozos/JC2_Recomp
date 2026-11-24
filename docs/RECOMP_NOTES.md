@@ -736,6 +736,16 @@ Mapped from SLUS_203.09 (`runtime/jc2_debug.cpp`), for testing without playing u
   and path 0x18F8 (mode 0x1000: (x, y, z, size), colour, (cos, sin); path 0x1630's flat quad turned about y,
   corners p - u, p + w, p - w, p + u with u = (h sin, 0, -h cos), w = (h cos, 0, h sin); 25 a batch, 3 qwords). Both
   small (8 elements), depth-tested, additive; not yet told apart on screen from the scenes' own lights.
+- Render targets: 0x4314E0's t0, when set, is a target (0x4326D0 writes it: FRAME from +0 FBP, +4 FBW, +8 PSM;
+  XYOFFSET +0xC / +0x10; SCISSOR +0x14 x0, +0x18 y0, +0x1C x1, +0x20 y1; a clear sprite of +0x30..+0x3C's colour).
+  The Wind Forest's "dust" (mode 0x400) is drawn into page 0x3800 (FBP 0x1C0, 64 x 64, offset 2016 so that GS
+  (2048, 2048) is its centre), not on screen: the light spots (mode 0x40, record 0x89DBD0) sample it; the light
+  spots' own t0 is the 640-wide display buffer given back. Native: a target narrower than the display (FBW <= 4) is
+  a picture made on the CPU (cleared, the quads rasterised with the texture, the vertex colour, the alpha test and
+  ALPHA), kept as that page's texture for the records sampling it. The dust no longer covers the hero. The light
+  spots drawn with it give a dust haze over the whole view (20 quads, 2 x 2, no depth test, ALPHA 0x44, vertex
+  alpha rising from 1 to about 30 after arrival): not checked against the console, so off unless
+  JC2_RENDERED_EFFECTS=1.
 - Engine master since this merge answers the IPU's registers as an idle decoder (libs/io.cpp), so without the native
   player the game would no longer stop there: it would run on with frames never written.
 - Testing gotcha: `timeout` (msys) and `scripts/bench_run.sh` lose variables set in front of them (JC2_TRACE_*): put

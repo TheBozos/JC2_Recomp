@@ -2028,6 +2028,95 @@ namespace jc2
             return &view;
         }
 
+        // ---- Program D into a texture page ----
+        // 0x4314E0's t0, when set, is a render target (0x4326D0 writes it as GS state): +0 FBP, +4 FBW, +8 PSM, +0xC /
+        // +0x10 XYOFFSET (12.4), +0x14 / +0x18 / +0x1C / +0x20 SCISSOR x0, y0, x1, y1, +0x30..+0x3C the clear colour (a
+        // sprite over the target before the draw). The Wind Forest draws its dust motes into page 0x3800 (64 x 64)
+        // that way and its light spots sample the page. Native: the target is a small picture made on the CPU from
+        // the draw's quads (no GS memory), kept as the page's texture for the records that sample it.
+        struct RenderedPage
+        {
+            uint32_t width = 0, height = 0;
+            std::vector<uint8_t> rgba; // GS values (alpha 0x80 opaque)
+            std::shared_ptr<bozo::render::Texture> texture;
+        };
+        std::map<uint32_t, RenderedPage> g_renderedPages; // by TBP (FBP x 32)
+        std::map<uint32_t, TextureView> g_renderedViews;  // by record
+
+        const TextureView *renderedPicture(const uint8_t *ram, uint32_t record)
+        {
+            const uint64_t tex0 = r64(ram, record + 0x20);
+            auto page = g_renderedPages.find(uint32_t(tex0) & 0x3FFFu);
+            if (page == g_renderedPages.end() || !page->second.texture)
+                return nullptr;
+            TextureView &view = g_renderedViews[record];
+            view.texture = page->second.texture;
+            view.key = page->second.texture->key;
+            // The record's place in the page; the picture is the whole target.
+            const float pw = float(1u << ((tex0 >> 26) & 15u)), ph = float(1u << ((tex0 >> 30) & 15u));
+            const float w = float(page->second.width), h = float(page->second.height);
+            view.su = pw / w, view.ou = 0, view.sv = ph / h, view.ov = 0;
+            return &view;
+        }
+
+        // A triangle into a target: ST interpolated (Q 1), the texture nearest and clamped, modulated by the vertex
+        // colour (0x80 = 1), the alpha test, then ALPHA's ((A - B) C >> 7) + D; the written alpha is the source's.
+        struct TargetVertex
+        {
+            float x, y, u, v;
+            uint32_t rgba;
+        };
+        void rasterTarget(RenderedPage &t, const uint32_t scissor[4], const TargetVertex tri[3],
+                          const bozo::render::Texture *texture, const bozo::render::Material &m)
+        {
+            const float area = (tri[1].x - tri[0].x) * (tri[2].y - tri[0].y) - (tri[2].x - tri[0].x) * (tri[1].y - tri[0].y);
+            if (std::fabs(area) < 1e-6f)
+                return;
+            const int x0 = std::max<int>(int(scissor[0]), int(std::floor(std::min({tri[0].x, tri[1].x, tri[2].x}))));
+            const int x1 = std::min<int>(int(scissor[2]), int(std::ceil(std::max({tri[0].x, tri[1].x, tri[2].x}))));
+            const int y0 = std::max<int>(int(scissor[1]), int(std::floor(std::min({tri[0].y, tri[1].y, tri[2].y}))));
+            const int y1 = std::min<int>(int(scissor[3]), int(std::ceil(std::max({tri[0].y, tri[1].y, tri[2].y}))));
+            for (int y = y0; y <= y1 && y < int(t.height); ++y)
+                for (int x = x0; x <= x1 && x < int(t.width); ++x)
+                {
+                    const float px = x + 0.5f, py = y + 0.5f;
+                    const float w0 = ((tri[1].x - px) * (tri[2].y - py) - (tri[2].x - px) * (tri[1].y - py)) / area;
+                    const float w1 = ((tri[2].x - px) * (tri[0].y - py) - (tri[0].x - px) * (tri[2].y - py)) / area;
+                    const float w2 = 1.0f - w0 - w1;
+                    if (w0 < 0 || w1 < 0 || w2 < 0)
+                        continue;
+                    uint32_t src[4];
+                    for (int c = 0; c < 4; ++c)
+                        src[c] = (tri[0].rgba >> (8 * c)) & 0xFFu; // flat: the strip's last vertex colours it
+                    if (texture && texture->width && texture->height)
+                    {
+                        const float u = w0 * tri[0].u + w1 * tri[1].u + w2 * tri[2].u;
+                        const float v = w0 * tri[0].v + w1 * tri[1].v + w2 * tri[2].v;
+                        const int tx = std::clamp(int(u * texture->width), 0, int(texture->width) - 1);
+                        const int ty = std::clamp(int(v * texture->height), 0, int(texture->height) - 1);
+                        const uint32_t texel = texture->rgba[size_t(ty) * texture->width + tx];
+                        for (int c = 0; c < 3; ++c)
+                            src[c] = std::min<uint32_t>(255u, ((texel >> (8 * c)) & 0xFFu) * src[c] >> 7);
+                        const uint32_t ta = ((texel >> 24) * 128u + 127u) / 255u; // back to the GS's 0..0x80
+                        src[3] = ta * src[3] >> 7;
+                    }
+                    if (m.alphaTest && src[3] < m.alphaRef)
+                        continue;
+                    uint8_t *dst = &t.rgba[(size_t(y) * t.width + x) * 4];
+                    const uint32_t as = src[3];
+                    auto pick = [&](uint32_t which, int c) -> int {
+                        return which == 0 ? int(src[c]) : which == 1 ? int(dst[c]) : 0;
+                    };
+                    const int coef = m.blendC == 0 ? int(as) : m.blendC == 1 ? int(dst[3]) : int(m.blendFix);
+                    for (int c = 0; c < 3; ++c)
+                    {
+                        const int value = (((pick(m.blendA, c) - pick(m.blendB, c)) * coef) >> 7) + pick(m.blendD, c);
+                        dst[c] = static_cast<uint8_t>(std::clamp(value, 0, 255));
+                    }
+                    dst[3] = static_cast<uint8_t>(std::min<uint32_t>(as, 255u));
+                }
+        }
+
         // The batches program D's path takes per mode (0x432170: VU 53.x = the object's +0x30): vertices per batch
         // (each batch its own strip) and qwords per vertex.
         bool programDShape(uint32_t mode, const uint8_t *ram, uint32_t object, uint32_t &batch, uint32_t &qwords)
@@ -2054,6 +2143,11 @@ namespace jc2
             // routine runs: it advances the animation and builds the game's own packets.
             const uint32_t object = ctx->r[4].uw[0], position = ctx->r[5].uw[0], anim = ctx->r[6].uw[0];
             const uint32_t gs = ctx->r[7].uw[0], cameraIndex = ctx->r[9].uw[0] & 3u, caller = ctx->r[31].uw[0];
+            // t0: a render target, or 0. A frame-sized one (FBW over 4: the 640-wide display buffers) is the screen
+            // given back explicitly (the Wind Forest's light spots pass it after drawing into page 0x3800).
+            uint32_t target = ctx->r[8].uw[0];
+            if (target && (target < 0x100000u || target + 0x40u > 0x2000000u || (r32(ram, target + 4) & 0x3Fu) > 4u))
+                target = 0;
             const float scale = ctx->f[12];
             const bool valid = object >= 0x100000u && object + 0x44u <= 0x2000000u && position >= 0x100000u &&
                                position + 16u <= 0x2000000u;
@@ -2097,6 +2191,11 @@ namespace jc2
                 notDrawn("mode not translated yet");
                 return;
             }
+            if (target && mode != 0x400u)
+            {
+                notDrawn("render target not translated for this mode");
+                return;
+            }
             if (buffer + size_t(count) * qwords * 16u > 0x2000000u)
                 return;
 
@@ -2110,7 +2209,9 @@ namespace jc2
                 source = "IPU";
                 if (!draw.texture)
                 {
-                    view = residentRecord(ram, record), source = "bank";
+                    view = renderedPicture(ram, record), source = "rendered";
+                    if (!view)
+                        view = residentRecord(ram, record), source = "bank";
                     if (!view && record >= 0x100000u && record + 0x60u <= 0x2000000u)
                         view = residentCopy(ram, record), source = "bank copy";
                     if (!view)
@@ -2122,6 +2223,17 @@ namespace jc2
                         view = uploadedPicture(ram, record), source = "TIM2";
                     if (view)
                         draw.texture = view->texture;
+                }
+                // A page drawn by the game (the Wind Forest's light spots sample its dust motes' target): the result is
+                // a haze over the whole view, not yet checked against the console's; JC2_RENDERED_EFFECTS=1 draws it.
+                static const bool renderedEffects = [] {
+                    const char *v = std::getenv("JC2_RENDERED_EFFECTS");
+                    return v && v[0] == '1';
+                }();
+                if (view && !std::strcmp(source, "rendered") && !renderedEffects)
+                {
+                    notDrawn("samples a rendered page (JC2_RENDERED_EFFECTS=1 to draw)");
+                    return;
                 }
                 if (!draw.texture && (r64(ram, record + 0x20) & 0x3FFFu) == kAnimationPage)
                     draw.texture = g_animationPage;
@@ -2371,7 +2483,57 @@ namespace jc2
             {
                 // Path 0x21D8: per element (x, y, half width, half height) in GS coordinates, colour; a screen quad at Z
                 // 0xFFFF: (x - w, y - h) (x + w, y - h) (x - w, y + h) (x + w, y + h) with ST (u0, v0), (u0, v1), (u1, v0),
-                // (u1, v1); the field's y to the frame's.
+                // (u1, v1); the field's y to the frame's. With a render target the quads go to the target's picture.
+                if (target >= 0x100000u && target + 0x40u <= 0x2000000u)
+                {
+                    const uint32_t fbp = r32(ram, target) & 0x1FFu, fbw = r32(ram, target + 4) & 0x3Fu;
+                    const float offX = float(r32(ram, target + 0xC)) / 16.0f, offY = float(r32(ram, target + 0x10)) / 16.0f;
+                    const uint32_t scissor[4] = {r32(ram, target + 0x14), r32(ram, target + 0x18), r32(ram, target + 0x1C),
+                                                 r32(ram, target + 0x20)};
+                    if (!fbw || scissor[2] >= 1024u || scissor[3] >= 1024u)
+                        return;
+                    RenderedPage &page = g_renderedPages[fbp * 32u];
+                    page.width = fbw * 64u, page.height = scissor[3] + 1u;
+                    page.rgba.assign(size_t(page.width) * page.height * 4u, 0);
+                    // The clear: the target's colour over its scissor.
+                    for (uint32_t y = scissor[1]; y <= scissor[3] && y < page.height; ++y)
+                        for (uint32_t x = scissor[0]; x <= scissor[2] && x < page.width; ++x)
+                            for (int c = 0; c < 4; ++c)
+                                page.rgba[(size_t(y) * page.width + x) * 4 + c] =
+                                    static_cast<uint8_t>(r32(ram, target + 0x30 + 4u * c));
+                    for (uint32_t i = 0; i < count; ++i)
+                    {
+                        const uint32_t q = buffer + i * 32u;
+                        const float x = rf(ram, q) - offX, y = rf(ram, q + 4) - offY, hw = rf(ram, q + 8),
+                                    hh = rf(ram, q + 12);
+                        const uint32_t c = colourAt(q + 16);
+                        const float corners[4][2] = {{x - hw, y - hh}, {x + hw, y - hh}, {x - hw, y + hh}, {x + hw, y + hh}};
+                        const float st[4][2] = {{u0, v0}, {u0, v1}, {u1, v0}, {u1, v1}};
+                        TargetVertex tv[4];
+                        for (int k = 0; k < 4; ++k)
+                        {
+                            bozo::render::Vertex mapped;
+                            uv(st[k][0], st[k][1], mapped);
+                            tv[k] = {corners[k][0], corners[k][1], mapped.u, mapped.v, c};
+                        }
+                        const TargetVertex a[3] = {tv[0], tv[1], tv[2]}, b[3] = {tv[1], tv[2], tv[3]};
+                        rasterTarget(page, scissor, a, draw.texture.get(), m);
+                        rasterTarget(page, scissor, b, draw.texture.get(), m);
+                    }
+                    auto texture = std::make_shared<bozo::render::Texture>();
+                    texture->width = page.width, texture->height = page.height;
+                    texture->rgba.resize(size_t(page.width) * page.height);
+                    for (size_t p = 0; p < texture->rgba.size(); ++p)
+                    {
+                        const uint8_t *s = &page.rgba[p * 4];
+                        const uint32_t alpha = std::min<uint32_t>(255u, uint32_t(s[3]) * 255u / 128u);
+                        texture->rgba[p] = uint32_t(s[0]) | uint32_t(s[1]) << 8 | uint32_t(s[2]) << 16 | alpha << 24;
+                    }
+                    texture->key = 0x3900000000000000ull | fbp * 32u;
+                    texture->version = page.texture ? page.texture->version + 1 : 1;
+                    page.texture = texture;
+                    return;
+                }
                 auto f = [](float y) { return 2.0f * y - 2048.0f; };
                 for (uint32_t i = 0; i < count; ++i)
                 {
@@ -2404,9 +2566,11 @@ namespace jc2
                             ta0 = std::min(ta0, t >> 24), ta1 = std::max(ta1, t >> 24);
                     std::fprintf(stderr, "[jc2:programD] mode %#x from %#x: %u elements, record %#x, texture %s, %zu "
                                          "vertices drawn, depth %d, alpha test %d (%u); x %.0f..%.0f y %.0f..%.0f, vertex "
-                                         "alpha %u..%u, texture alpha %u..%u (%s), uv %.3f..%.3f\n",
+                                         "alpha %u..%u, texture alpha %u..%u (%s), uv %.3f..%.3f; position %.2f %.2f %.2f "
+                                         "scale %.3f, target %#x\n",
                                  mode, caller, count, record, draw.texture ? "yes" : "no", draw.vertices.size(),
-                                 m.depthTest, m.alphaTest, m.alphaRef, x0, x1, y0, y1, a0, a1, ta0, ta1, source, u0, u1);
+                                 m.depthTest, m.alphaTest, m.alphaRef, x0, x1, y0, y1, a0, a1, ta0, ta1, source, u0, u1, pos[0], pos[1],
+                                 pos[2], scale, ctx->r[8].uw[0]);
                 }
                 // JC2_DUMP_EFFECT_TEXTURES=dir: each effect texture once, as raw RGBA (record_wxh.rgba).
                 static const char *dumpDir = std::getenv("JC2_DUMP_EFFECT_TEXTURES");
@@ -2654,6 +2818,8 @@ namespace jc2
             g_effects.clear();
             g_gsPictures.clear();
             g_uploadedViews.clear();
+            g_renderedPages.clear();
+            g_renderedViews.clear();
         }
     }
 
