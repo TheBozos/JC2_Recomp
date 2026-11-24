@@ -842,3 +842,13 @@ fifth VU1 program (kind 5: microcode 0x4DFBF0, 107 pairs, uploaded by 0x1FB330).
   2 at its size; drawn after the effects, before the depth of field and the fades. Seen at stage 8: the edges soften
   (edge strength -33% top right, -26% left, -15% centre); not compared with a console capture. JC2_HEAT_HAZE=0 turns it
   off, JC2_TRACE_HAZE=1 counts it.
+- Forest survey by stage (`--forest-stage N --scene S`, from s25000, 2026-11-24): the Water Forest's stages 8 to 14
+  (bits 0x2, 0x10: 0x22CED0) use program D's mode 0x8, the Earth Forest's 8 and 12 and the Fire Forest's 4 (0x22C290,
+  0x24C6B8, 0x4774E8) mode 0x4. Paths 0x740 (mode 4) and 0x9C8 (mode 8) are the same but for a constant k (0.707107,
+  60): per element (x, y, z, size), colour; a camera-facing triangle p - a s + b s, p - a s - b s, p + k a s (a, b as
+  path 0x1240's), ST (u1, v1), (u0, v1), ((u0 + u1) / 2, v0), dropped whole when a corner is outside the clip volume.
+  Drawn natively: mode 8 is the rain of "Water Shade", mode 4 the drifting spores of "Groundwork".
+- Bit 0x4000 (0x4AF990, flags 0xD880: the dark forests' late stages) draws an object (0x8BF424) that an event sets
+  up (0x1F5290 from the scene scripts, resources 0xD02 / 0xD04 through the callback 0x4AF7D0). A stage forced
+  without that event leaves it null and the routine faults in sceVu0CopyVector within 8 frames: an artifact of
+  forcing the stage (Dark Wind 12, Dark Fire 24), not a port fault. No forest's table sets bit 0x40 (0x205990).

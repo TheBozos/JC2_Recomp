@@ -2202,8 +2202,8 @@ namespace jc2
             // Native: modes 2 (strips: the water), 0x40 (world quads) and 0x400 (screen quads). Others are listed once.
             const bool native =
                 known && batchSize &&
-                (mode == 2u || mode == 0x10u || mode == 0x20u || mode == 0x40u || mode == 0x80u || mode == 0x400u ||
-                 mode == 0x1000u);
+                (mode == 2u || mode == 4u || mode == 8u || mode == 0x10u || mode == 0x20u || mode == 0x40u ||
+                 mode == 0x80u || mode == 0x400u || mode == 0x1000u);
             auto notDrawn = [&](const char *why) {
                 static std::set<uint64_t> seen;
                 if (seen.size() < 64 && seen.insert(uint64_t(mode) << 32 | caller).second)
@@ -2410,6 +2410,39 @@ namespace jc2
                         uv(st[k][0], st[k][1], out[k]);
                     }
                     draw.vertices.insert(draw.vertices.end(), {out[0], out[1], out[2], out[1], out[2], out[3]});
+                }
+            }
+            else if (mode == 4u || mode == 8u)
+            {
+                // Paths 0x740 (mode 4) and 0x9C8 (mode 8), the same but for a constant k (0.707107, 60): per element
+                // (x, y, z, size), colour; a camera-facing triangle p - a s + b s, p - a s - b s, p + k a s with a, b
+                // as path 0x1240's (a spike along a for mode 8) and ST (u1, v1), (u0, v1), ((u0 + u1) / 2, v0); dropped
+                // whole when a corner is outside the clip volume.
+                const float k = mode == 4u ? 0.707107f : 60.0f;
+                const float az[3] = {view4.m[2], view4.m[6], view4.m[10]};
+                const float a[3] = {-view4.m[1], -view4.m[5], -view4.m[9]};
+                const float b[3] = {az[1] * a[2] - az[2] * a[1], az[2] * a[0] - az[0] * a[2], az[0] * a[1] - az[1] * a[0]};
+                const float st[3][2] = {{u1, v1}, {u0, v1}, {(u0 + u1) * 0.5f, v0}};
+                const float sa[3] = {-1, -1, k}, sb[3] = {1, -1, 0};
+                for (uint32_t i = 0; i < count; ++i)
+                {
+                    const uint32_t q = buffer + i * 32u;
+                    const float p[3] = {rf(ram, q), rf(ram, q + 4), rf(ram, q + 8)}, sz = rf(ram, q + 12);
+                    const uint32_t col = colourAt(q + 16);
+                    bozo::render::Vertex out[3];
+                    bool ok = true;
+                    for (int c = 0; c < 3 && ok; ++c)
+                    {
+                        float w4[3];
+                        for (int d = 0; d < 3; ++d)
+                            w4[d] = p[d] + (sa[c] * a[d] + sb[c] * b[d]) * sz;
+                        float scr[3] = {0, 0, 0}, wq = 0;
+                        ok = insideClip(cw, w4) && project(pvw, w4, scr, wq);
+                        out[c].x = scr[0], out[c].y = scr[1], out[c].z = scr[2], out[c].rgba = col;
+                        uv(st[c][0], st[c][1], out[c]);
+                    }
+                    if (ok)
+                        draw.vertices.insert(draw.vertices.end(), {out[0], out[1], out[2]});
                 }
             }
             else if (mode == 0x80u)

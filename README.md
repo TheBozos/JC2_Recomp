@@ -39,7 +39,7 @@ a time. Windows comes first, then Linux.
 | New game: opening movie, first scenes and dialogue, the Jade Throne Room, the forests | ✅ |
 | Battles drawn (stage, monsters, effects) | ✅ |
 | Animated IPU textures decoded natively (D001's water) | ✅ |
-| Forest and town effects (VU1 program D: water, fireflies, dust, motes; program E: the Fire Forest's heat haze) | 🔧 |
+| Forest and town effects (VU1 program D: water, rain, spores, fireflies, dust, motes; program E: the Fire Forest's heat haze) | 🔧 |
 | Debug teleport (`--scene`, field scenes), battle launcher (`--battle`, `--battle-group`), story state (`--chapter`, `--subarea`...) | ✅ |
 | Memory card saves | ⏳ |
 | Linux build | ⏳ |
