@@ -44,6 +44,7 @@ namespace jc2
     void installDebug(uint8_t *ram, std::function<void(const std::string &)> message);
     void requestScene(int scene, uint64_t atFrame);
     void installDebugOverrides(bozo::port::Registry &);
+    void installIpu(bozo::port::Registry &);
     void requestBattle(int opponent, uint64_t atFrame, bool group);
     void debugFrame(uint8_t *ram, uint64_t frame);
     // Save states: JC2's part (jc2_port.cpp, jc2_audio.cpp, jc2_meshes.cpp, jc2_2d.cpp).
@@ -67,6 +68,7 @@ static int run(int argc, char **argv)
     window = true;
     bozo::app::setIdentity({"Jade Cocoon 2", "JC2_Recomp", "jc2-recomp", "SLUS_203.09"});
     bozo::app::WindowOptions windowOptions;
+    bool mute = false; // no audio device: test runs stay silent (--mute, --hidden)
     windowOptions.title = "Jade Cocoon 2 - BozoEngine";
     windowOptions.width = 960;
     windowOptions.height = 720;
@@ -132,13 +134,21 @@ static int run(int argc, char **argv)
             windowOptions.captureFrames.push_back(std::stoull(argv[++i]));
         else if (a == "--quit-after" && i + 1 < argc)
             windowOptions.quitAfterFrames = std::stoull(argv[++i]);
+        else if (a == "--hidden")
+        {
+            windowOptions.hidden = true; // a test run: the window never shows, captures read the offscreen picture
+            mute = true;
+        }
+        else if (a == "--mute")
+            mute = true;
 #endif
         else
         {
             std::fprintf(stderr, "Usage: jc2-headless [--frames N] [--pad-script FILE] [--card-dir DIR] [--elf FILE]\n"
                                  "                    [--iso FILE] [--out FILE] [--dump-ram FILE] [--profile-io]\n"
                                  "                    [--load-state FILE [--load-state-at FRAME]] [--save-state FILE --save-state-at FRAME]\n"
-                                 "                    [--scene N [--scene-at FRAME]] [--battle N | --battle-group N [--battle-at FRAME]]\n");
+                                 "                    [--scene N [--scene-at FRAME]] [--battle N | --battle-group N [--battle-at FRAME]]\n"
+                                 "                    window: [--hidden (silent too)] [--mute] [--capture-dir DIR --capture-frame N ...] [--quit-after N]\n");
             return a == "--help" ? 0 : 2;
         }
     }
@@ -165,6 +175,7 @@ static int run(int argc, char **argv)
     jc2::installDraw(d.runtime(), registry);
     jc2::installMeshes(d.runtime(), registry);
     jc2::installDebugOverrides(registry);
+    jc2::installIpu(registry);
     // JC2_TRACE_SIF=1: the IOP modules the game asks for and the RPC services it binds.
     const bool traceSif = std::getenv("JC2_TRACE_SIF") != nullptr;
     jc2::installAudio(host.libraries(), traceSif);
@@ -219,7 +230,7 @@ static int run(int argc, char **argv)
         if (recording.isOpen())
             recording.write(pcm, count);
 #ifdef JC2_WITH_WINDOW
-        if (window)
+        if (window && !mute)
             audio.push(pcm, count);
 #endif
     };
@@ -236,7 +247,7 @@ static int run(int argc, char **argv)
     auto play = [&]() -> int
     {
 #ifdef JC2_WITH_WINDOW
-        if (window)
+        if (window && !mute)
             audio.open();
 #endif
         uint64_t frames = 0;

@@ -646,3 +646,31 @@ Mapped from SLUS_203.09 (`runtime/jc2_debug.cpp`), for testing without playing u
   by 0x1E5100, reset to "no script" by 0x1E51B0 from the battle handler): with no script behind it, the group is
   cleared, the battle shows four default bugs and waits for ever. To finish: start a real battle script (the group's
   name) rather than fill the block. Until then the Arena lesson (s26200_arena_lesson) is the battle to test with.
+
+## IPU animations (2026-11-23)
+
+- Besides the PSS movies, the game plays ".ipu" streams itself as animated textures ("ipum" header: size, width,
+  height, frames; then intra-only IPU frames), driving the IPU directly. Scene D001's water is one (64 x 64, 298
+  frames, at 0x1947B80 in that scene); the battle code uses the same player (0x415xxx, 0x432xxx). Before this the run
+  ended on the first IPU register write ("unhandled device write at 0x10002000", pc 0x2B0F08).
+- The player (0x2AF530-0x2B2260): a group (active one at gp-0x727C: +0 flags, +4 count, +8 objects of 0x70 bytes,
+  +0xC the current one) of objects (+0 flags 1 on, 2 playing, 4 finished, 8 looping, 0x10 in the IPU, 0x20 held;
+  +0x28 the stream; +0x38 / +0x3C frames done / total; +0x40 loops; +0x44 x +0x48 macroblocks; a ring of +0x54
+  frames at +0x6C, +0x58 the next slot, +0x5C the frames waiting). The kick 0x2B1990 -> 0x2B1AC0 -> 0x2B0DA0 starts a
+  frame (IPU reset, to-IPU DMA of the stream, FDEC the frame's flags, IDEC to RGB32 by from-IPU DMA); the from-IPU
+  handler 0x2B1780 ends it (0x2B10F0) and starts the next until the rings are full.
+- Native (`runtime/jc2_ipu.cpp`, BozoEngine `bozo/libs/ipu_stream.h`: FFmpeg's "ipu" parser and decoder): 0x2B0DA0
+  decodes the next frame into its ring slot as the CSC lays it out (16 x 16 RGB32 macroblocks) with 0x2B10F0's
+  bookkeeping; 0x2B1AC0 fills every ring and reports nothing in flight. `ffmpeg -f ipu` decodes D001's stream (297 of
+  298 frames; the last one is short). JC2_TRACE_IPU=1 lists the streams opened, the group's state and the calls.
+- Checked (2026-11-24, engine master 36991be and later, s24300_arena with `--scene 581`): D001 no longer stops. Its one
+  object (0x1947AF0, looping) opens, frames are decoded into its two-slot ring and the game takes them (waiting 2, 1,
+  2...), about one frame every two to three. Everything goes through 0x2B1AC0 (0 direct 0x2B0DA0 calls): with one
+  object the DMA handler never asks for the next. Not seen on screen yet: in the arrival view nothing but the hero
+  changes between frames, so the water is off camera or its uploads are not drawn by the native renderer; to find.
+- Engine master since this merge answers the IPU's registers as an idle decoder (libs/io.cpp), so without the native
+  player the game would no longer stop there: it would run on with frames never written.
+- Testing gotcha: `timeout` (msys) and `scripts/bench_run.sh` lose variables set in front of them (JC2_TRACE_*): put
+  `env VAR=1` in the command after bench_run.sh.
+- The JC2 save states (before 2026-11-24) needed the engine to read four older section layouts: pad (libpad2 sockets),
+  mpeg (`inputEnded`), sif (the IOP's software registers) and the 989SND section (absent).

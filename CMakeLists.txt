@@ -114,7 +114,7 @@ add_custom_command(OUTPUT ${jc2_mesh_pack}
   COMMENT "Converting JC2's 3D models into the mesh pack")
 add_custom_target(jc2_meshes_pack ALL DEPENDS ${jc2_mesh_pack})
 
-set(jc2_runtime runtime/jc2_main.cpp runtime/jc2_port.cpp runtime/jc2_audio.cpp runtime/jc2_draw.cpp runtime/jc2_2d.cpp runtime/jc2_meshes.cpp runtime/jc2_debug.cpp)
+set(jc2_runtime runtime/jc2_main.cpp runtime/jc2_port.cpp runtime/jc2_audio.cpp runtime/jc2_draw.cpp runtime/jc2_2d.cpp runtime/jc2_meshes.cpp runtime/jc2_debug.cpp runtime/jc2_ipu.cpp)
 add_executable(jc2-headless ${jc2_runtime} $<TARGET_OBJECTS:jc2_audio_code>)
 target_include_directories(jc2-headless PRIVATE ${jc2_audio_gen})
 target_link_libraries(jc2-headless PRIVATE jc2_game jc2_overlays bozo_host)
