@@ -144,12 +144,20 @@ namespace jc2
         const bool group = g_battleGroup.load();
         const uint32_t party = group ? kGroups + 0x30u * uint32_t(opponent) : kOpponents + 0x94u * uint32_t(opponent) + 0x30u;
         ram[kBattleKind - 1] = 0xFF;
-        ram[kBattleKind] = 3;
+        ram[kBattleKind] = group ? 7 : 3; // an event script's battle (the Arena lesson's command 0x1C: 7) / a hunter's
         ram[kBattleKind + 1] = ram[kBattleKind + 2] = 0;
         w32(ram, kEnemyGroup, party);
         w32(ram, kBattleKind - 1 + 8, 0);
-        w32(ram, kBattleKind - 1 + 0xC, 1);
+        w32(ram, kBattleKind - 1 + 0xC, group ? 3 : 1);
         w32(ram, kBattleKind - 1 + 0x10, 0xFFFFFFFFu);
+        if (group)
+        {
+            // As the lesson's battle leaves the scene (JC2_TRACE_BATTLE): the stage word 0; the group also in the
+            // scene's script context (+0x20), which the context at 0x89B010 is copied from before the exit
+            // (0x1E5100): written only at 0x89B028, the group was 0 again when 0x286260 read it.
+            w32(ram, kBattleKind - 1 + 4, 0);
+            w32(ram, scene + 0x20, party);
+        }
         // The forest hunter encounter's setup too (0x221B14): the party, -1, 0, 0.
         w32(ram, kBattleSetup + 8, party);
         w32(ram, kBattleSetup + 4, 0xFFFFFFFFu);
@@ -221,14 +229,63 @@ namespace jc2
                 g_message(message);
         }
         const bool battle = scene >= 0x100000u && scene < 0x2000000u - 8 && startBattle(ram, scene);
+        const uint32_t party = battle ? r32(ram, kEnemyGroup) : 0;
         rt->functions.generated(kSceneStep)(ram, ctx, rt);
         if (battle)
+        {
             ctx->r[2].ud[0] = kModeBattle; // the scene leaves into a battle
+            // The step's script runner copies the running script's context over 0x89B010..0x89B030 (0x1E5100): the
+            // group written before it was 0 again by the exit (JC2_TRACE_BATTLE). Written again after it.
+            w32(ram, kEnemyGroup, party);
+        }
+    }
+
+    // JC2_TRACE_BATTLE=1: the way into a battle. The field task step 0x1A1670(task): its +8 (the transition: 2 or
+    // 0x17 read the enemies' group) and +0xC (its state) when they change; the enemies' set-up 0x286260(group); the
+    // scene exit 0x1E7500(scene) with the mode the step left at scene +0x1314.
+    constexpr uint32_t kFieldTask = 0x001A1670u;
+    constexpr uint32_t kEnemySetup = 0x00286260u;
+    constexpr uint32_t kSceneExit = 0x001E7500u;
+    const bool traceBattle = std::getenv("JC2_TRACE_BATTLE") != nullptr;
+    void fieldTask(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+    {
+        const uint32_t task = ctx->r[4].uw[0];
+        if (traceBattle && task >= 0x100000u && task + 0x10u <= 0x2000000u)
+        {
+            static uint64_t last = ~0ull;
+            const uint64_t now = uint64_t(r32(ram, task + 8)) << 32 | r32(ram, task + 0xC);
+            if (now != last)
+            {
+                last = now;
+                std::printf("[jc2:battle] frame %llu: field task %#x +8 %u +0xC %u\n", (unsigned long long)g_frame.load(),
+                            task, r32(ram, task + 8), r32(ram, task + 0xC));
+            }
+        }
+        rt->functions.generated(kFieldTask)(ram, ctx, rt);
+    }
+    void enemySetup(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+    {
+        if (traceBattle)
+            std::printf("[jc2:battle] frame %llu: enemies from group %#x (ra %#x)\n", (unsigned long long)g_frame.load(),
+                        ctx->r[4].uw[0], ctx->r[31].uw[0]);
+        rt->functions.generated(kEnemySetup)(ram, ctx, rt);
+    }
+    void sceneExit(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+    {
+        const uint32_t scene = ctx->r[4].uw[0];
+        if (traceBattle && scene >= 0x100000u && scene + 0x1318u <= 0x2000000u)
+            std::printf("[jc2:battle] frame %llu: scene exit %#x mode %u, battle block %08x %08x %08x %08x, group %#x\n",
+                        (unsigned long long)g_frame.load(), scene, r32(ram, scene + 0x1314), r32(ram, 0x0089B070u),
+                        r32(ram, 0x0089B074u), r32(ram, 0x0089B078u), r32(ram, 0x0089B07Cu), r32(ram, 0x0089B028u));
+        rt->functions.generated(kSceneExit)(ram, ctx, rt);
     }
 
     void installDebugOverrides(bozo::port::Registry &r)
     {
         r.registerFunction(kSceneStep, sceneStep);
+        r.registerFunction(kFieldTask, fieldTask);
+        r.registerFunction(kEnemySetup, enemySetup);
+        r.registerFunction(kSceneExit, sceneExit);
     }
 
     void installDebug(uint8_t *ram, std::function<void(const std::string &)> message)

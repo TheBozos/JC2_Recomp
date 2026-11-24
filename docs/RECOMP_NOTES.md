@@ -646,6 +646,22 @@ Mapped from SLUS_203.09 (`runtime/jc2_debug.cpp`), for testing without playing u
   by 0x1E5100, reset to "no script" by 0x1E51B0 from the battle handler): with no script behind it, the group is
   cleared, the battle shows four default bugs and waits for ever. To finish: start a real battle script (the group's
   name) rather than fill the block. Until then the Arena lesson (s26200_arena_lesson) is the battle to test with.
+  - 2026-11-24: 0x89B010..0x89B030 is the running script's context (0x1E5100 copies scene +0x10..+0x28 into it as
+    a script starts; 0x1E51B0 resets it: +4 = 0x19 "no script", +8 = -2); command 0x1C writes the battle block
+    (0x89B070 -1, kind at 0x89B071, 0x89B074 the stage word, 0x89B07C 0, 0x89B080 -1) and the group pointer at
+    0x89B028 itself. The lesson's context in battle: 2, 2, -2, 0x45, 1, 0, group 0x588020 (215,
+    "esAsg_Battle_Tutorial3"), kind 7. Copying all of that (kind 7, the context) into the launcher still gives the
+    four default bugs: the enemies come from 0x286260(group), which the field task 0x1A1670 calls only when its
+    struct's +8 is 2 or 0x17 (its +0xC a 23-way state); the launcher's exit (scene step returning 3) does not
+    reach it. Next: trace 0x1A1670's +8 / +0xC on the lesson's way into battle (an override, so a full rebuild).
+  - Traced (JC2_TRACE_BATTLE=1: the field task 0x1A1670's +8 / +0xC, the enemies' set-up 0x286260, the scene exit
+    0x1E7500): the lesson and the launcher take the same way (exit, field task +8 2 / +0xC 3, 0x286260 from
+    0x1A1B58), but the launcher's group was 0 there: its write came before the scene step, whose script runner then
+    copies the running script's context over 0x89B010..0x89B030. Fixed: the group is written again after the step,
+    and for --battle-group the block as the lesson's command leaves it (kind 7, 0x89B074 0, 0x89B07C 3). A launched
+    battle now has its group's enemies (215: the lesson's Rook and its minion; 145, "eM2ARENA_BATTLE_LV2_3": its
+    three monsters). It still does not start: no command menu, nothing moves with Cross presses (40 s), the same with
+    the lesson's script context (2, 2, -2, 0x45, 1) copied in. Next: the battle task's own state, where it waits.
 
 ## IPU animations (2026-11-23)
 
