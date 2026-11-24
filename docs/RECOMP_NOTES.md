@@ -687,11 +687,12 @@ Mapped from SLUS_203.09 (`runtime/jc2_debug.cpp`), for testing without playing u
   Program D's microcode (dumped by walking its MPG packet, disassembled with TMB's tools/vu_disasm.py): init at 0
   multiplies the context's matrices (VU 0x49 = P V W, 0x55 = clip W), the water's path (VU 53.x = 2) at 0x5B0
   projects (x, y, z, 1) by P V W and clips by clip W: the same maths, no height offset.
-- Open: in D001's arrival view the room covers the water. The world is y down: the hero's feet and the ground by
-  him are at y -0.6, and the ground chunks (res 2690, flags 0x482A) line the channel between -0.6 and 0 over the
-  tiles, so the surface at y ~0 (+- 0.05 waves) is under them; with the depth test off the water fills the channel's
-  shape, and raised by 0.4 (JC2_WATER_DY=-0.4) it sits in the channel between the banks. Whether the room or the
-  surface is off needs the console's picture of this view.
+- Where it shows: in D001's arrival view the room covers it. The world is y down: the hero's feet and the ground
+  by him are at y -0.6, and the ground chunks (res 2690, flags 0x482A) line the channel there at about -0.3, above
+  the surface at y ~0 (+- 0.05 waves); with the depth test off the water fills the channel's shape. The console
+  agrees: program B places the room's vertices with P V W alone (its bit 0x2 only takes the colours from the
+  vertices), and no draw of the frame masks depth (every ZBUF is Z32 with ZMSK clear). Walking up from the arrival
+  point (pad UP for 150 frames from 24700) the pool beyond the plants shows the water, animated, between its banks.
 - Engine master since this merge answers the IPU's registers as an idle decoder (libs/io.cpp), so without the native
   player the game would no longer stop there: it would run on with frames never written.
 - Testing gotcha: `timeout` (msys) and `scripts/bench_run.sh` lose variables set in front of them (JC2_TRACE_*): put
