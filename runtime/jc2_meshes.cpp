@@ -1053,6 +1053,55 @@ namespace jc2
                             skinned ? "skinned" : "static", resource, chain, material.flags,
                             (unsigned long long)material.prim, (unsigned long long)material.alpha, material.colour[3],
                             draw.batches[0].vertices.size() / 3, x0, x1, y0, y1, behind, cull ? " cull" : "");
+                // JC2_TRACE_AREA=x0,z0,x1,z1: the world heights of this part's vertices over that area (static only).
+                static const char *area = std::getenv("JC2_TRACE_AREA");
+                float ax0, az0, ax1, az1;
+                if (skinned && area)
+                {
+                    float sy0 = 1e30f, sy1 = -1e30f, sx = 0, sz = 0;
+                    for (const bozo::render::Vertex &v : draw.batches[0].vertices)
+                        sy0 = std::min(sy0, v.y), sy1 = std::max(sy1, v.y), sx += v.x, sz += v.z;
+                    const float n = float(std::max<size_t>(1, draw.batches[0].vertices.size()));
+                    std::printf("[jc2:area] skinned res %u chain %#x: y %.3f..%.3f, centre x %.2f z %.2f\n", resource, chain,
+                                sy0, sy1, sx / n, sz / n);
+                }
+                if (!skinned && area && std::sscanf(area, "%f,%f,%f,%f", &ax0, &az0, &ax1, &az1) == 4)
+                {
+                    float hy0 = 1e30f, hy1 = -1e30f;
+                    unsigned n = 0;
+                    for (const bozo::render::Vertex &v : draw.batches[0].vertices)
+                    {
+                        const float o4[4] = {v.x, v.y, v.z, 1.0f};
+                        float w4[4];
+                        apply(world, o4, w4);
+                        if (w4[0] >= ax0 && w4[0] <= ax1 && w4[2] >= az0 && w4[2] <= az1)
+                            hy0 = std::min(hy0, w4[1]), hy1 = std::max(hy1, w4[1]), ++n;
+                    }
+                    if (n)
+                        std::printf("[jc2:area] res %u chain %#x: %u vertices in the area, y %.3f..%.3f\n", resource, chain,
+                                    n, hy0, hy1);
+                    // JC2_TRACE_AREA_FILE: every triangle of the part in world space (x y z, nine floats a line).
+                    static FILE *triangles = [] {
+                        const char *path = std::getenv("JC2_TRACE_AREA_FILE");
+                        return path ? std::fopen(path, "w") : nullptr;
+                    }();
+                    if (triangles && n)
+                    {
+                        const auto &vs = draw.batches[0].vertices;
+                        for (size_t t = 0; t + 2 < vs.size(); t += 3)
+                        {
+                            for (int k = 0; k < 3; ++k)
+                            {
+                                const float o4[4] = {vs[t + k].x, vs[t + k].y, vs[t + k].z, 1.0f};
+                                float w4[4];
+                                apply(world, o4, w4);
+                                std::fprintf(triangles, "%.3f %.3f %.3f ", w4[0], w4[1], w4[2]);
+                            }
+                            std::fprintf(triangles, "%u\n", chain);
+                        }
+                        std::fflush(triangles);
+                    }
+                }
             }
             (draw.batches[0].blended ? g_blended : g_opaque).push_back(std::move(draw));
         }
@@ -1417,6 +1466,174 @@ namespace jc2
             rt->functions.generated(kPrimitiveDrawer)(ram, ctx, rt);
         }
 
+        // ---- Water surfaces: 0x206850, VU1 program D (microcode 0x4DFF60) ----
+        // The water system at 0x89D3E0: +0x14 the tiles queued this frame, +0x20 their positions (16 bytes each),
+        // +0x200 the grid being drawn (its vertex buffer; the system double-buffers it), +0x210 / +0x220 the grid's
+        // bounds (x, -, z), +0x260 the texture record (+0x14 size, +0x20 TEX0; the scene's animation plays into it). The
+        // routine moves the waves, then for each tile submits the grid with world = translation to the tile (scale
+        // 1.0) and the frame's camera (0x6CC5F4[0]) through 0x4314E0's program D path, and clears the queue. The grid:
+        // rows of batches, each a strip of vertices of two qwords, (S, T, 1, 0) then (x, y, z, 1), y the wave height;
+        // S and T run 0..2 over the tile (the 64 x 64 texture repeats: CLAMP region repeat). GS state as the program
+        // draws it: ALPHA (Cs - Cd) FIX + Cd, FIX 0x3F, depth test GEQUAL, no depth write.
+        // Native: the same strips with program C's projection (P V W, field y), the texture the latest picture the
+        // game took from its IPU animation (the object 0x80 after the record: its ring in RAM, the CSC's macroblocks).
+        // Program D's path for these (VU 53.x = 2, from 0x5B0; init at 0: VU 0x49 = P V W, 0x55 = clip W) has the
+        // same maths, no height offset. JC2_TRACE_WATER=1 traces the draws (JC2_WATER_NODEPTH=1: without the depth
+        // test; JC2_WATER_DY: a height offset), JC2_TRACE_AREA / JC2_TRACE_AREA_FILE the room's heights over an area.
+        constexpr uint32_t kWaterDraw = 0x00206850u;
+        constexpr uint32_t kWater = 0x0089D3E0u;
+        struct WaterTexture
+        {
+            std::shared_ptr<bozo::render::Texture> texture;
+            uint64_t hash = 0;
+        };
+        std::map<uint32_t, WaterTexture> g_waterTextures; // by texture record
+
+        std::shared_ptr<const bozo::render::Texture> waterTexture(const uint8_t *ram, uint32_t record)
+        {
+            if (record < 0x100000u || record + 0x100u > 0x2000000u)
+                return nullptr;
+            const uint32_t size = r32(ram, record + 0x14), w = size & 0xFFFFu, h = size >> 16;
+            const uint32_t object = record + 0x80u, stream = r32(ram, object + 0x28) & 0x1FFFFFFu;
+            const uint32_t mbw = r32(ram, object + 0x44), mbh = r32(ram, object + 0x48), ring = r32(ram, object + 0x54);
+            if (!w || !h || w > 512u || h > 512u || mbw * 16u != w || mbh * 16u != h || !ring || ring > 16u ||
+                stream < 0x100000u || stream + 4u > 0x2000000u || std::memcmp(ram + stream, "ipum", 4) != 0)
+                return nullptr;
+            // The picture the game took last: taking slot s leaves s = next - waiting - 1, and decoding moves both.
+            const uint32_t slot = (r32(ram, object + 0x58) - r32(ram, object + 0x5C) - 1u) % ring;
+            const uint32_t frameBytes = mbw * mbh * 1024u, base = (r32(ram, object + 0x6C) & 0x1FFFFFFu) + slot * frameBytes;
+            if (base < 0x100000u || base + frameBytes > 0x2000000u)
+                return nullptr;
+            const uint8_t *src = ram + base;
+            uint64_t hash = 1469598103934665603ull;
+            for (uint32_t i = 0; i < frameBytes; i += 64)
+                hash = (hash ^ (uint64_t(src[i]) | uint64_t(src[i + 1]) << 8 | uint64_t(src[i + 2]) << 16)) * 1099511628211ull;
+            WaterTexture &t = g_waterTextures[record];
+            if (t.texture && t.hash == hash)
+                return t.texture;
+            auto texture = std::make_shared<bozo::render::Texture>();
+            texture->width = w, texture->height = h;
+            texture->rgba.resize(size_t(w) * h);
+            texture->key = 0x3E00000000000000ull | record;
+            texture->version = t.texture ? t.texture->version + 1 : 1;
+            // Macroblocks in raster order, each 16 rows of 16 RGBA pixels; alpha 0x80 is opaque.
+            for (uint32_t my = 0; my < mbh; ++my)
+                for (uint32_t mx = 0; mx < mbw; ++mx)
+                {
+                    const uint8_t *mb = src + (size_t(my) * mbw + mx) * 1024u;
+                    for (uint32_t y = 0; y < 16; ++y)
+                        for (uint32_t x = 0; x < 16; ++x)
+                        {
+                            const uint8_t *p = mb + (y * 16u + x) * 4u;
+                            const uint32_t a = std::min<uint32_t>(255u, uint32_t(p[3]) * 255u / 128u);
+                            texture->rgba[size_t(my * 16u + y) * w + mx * 16u + x] =
+                                uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | a << 24;
+                        }
+                }
+            t.texture = texture, t.hash = hash;
+            return texture;
+        }
+
+        void waterDraw(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+        {
+            const uint32_t tiles = std::min<uint32_t>(r32(ram, kWater + 0x14), 64u);
+            float positions[64][3];
+            for (uint32_t i = 0; i < tiles; ++i)
+                for (int k = 0; k < 3; ++k)
+                    positions[i][k] = rf(ram, kWater + 0x20 + 16u * i + 4u * k);
+            rt->functions.generated(kWaterDraw)(ram, ctx, rt); // the waves, the game's own packets, the queue cleared
+            const uint32_t camera = r32(ram, 0x006CC5F4u);
+            if (meshesOff || !tiles || !camera)
+                return;
+            const uint32_t grid = r32(ram, kWater + 0x200);
+            if (grid < 0x100000u || grid + 0x40u > 0x2000000u)
+                return;
+            // The grid's shape from its bounds and first vertices: columns along x in a strip, rows along z.
+            const float minX = rf(ram, kWater + 0x210), minZ = rf(ram, kWater + 0x218);
+            const float maxX = rf(ram, kWater + 0x220), maxZ = rf(ram, kWater + 0x228);
+            const float dx = rf(ram, grid + 0x40 + 16) - rf(ram, grid + 16), dz = rf(ram, grid + 0x20 + 24) - rf(ram, grid + 24);
+            if (!(dx > 1e-4f) || !(dz > 1e-4f) || !(maxX > minX) || !(maxZ > minZ))
+                return;
+            const uint32_t columns = static_cast<uint32_t>(std::lround((maxX - minX) / dx));
+            const uint32_t rows = static_cast<uint32_t>(std::lround((maxZ - minZ) / dz));
+            if (!columns || !rows || columns > 256u || rows > 256u)
+                return;
+            const uint32_t strip = 2u * (columns + 1u); // vertices per batch
+            if (grid + size_t(rows) * strip * 32u > 0x2000000u)
+                return;
+
+            ScreenDraw draw;
+            draw.texture = waterTexture(ram, r32(ram, kWater + 0x260));
+            bozo::render::Material &m = draw.material;
+            m.textured = draw.texture != nullptr;
+            m.directColour = !m.textured;
+            m.clampU = m.clampV = false;
+            m.gsBlend = true;
+            m.blendA = 0, m.blendB = 1, m.blendC = 2, m.blendD = 1, m.blendFix = 0x3F;
+            m.depthTest = true, m.depthWrite = false;
+            if (m.textured)
+                m.tex0 = draw.texture->key;
+            const uint32_t colour = 0x80808080u;
+            const Mat view = readMat(ram, camera + 0x130), projection = readMat(ram, camera + 0x170);
+            const Mat clip = readMat(ram, camera + 0x230);
+            for (uint32_t i = 0; i < tiles; ++i)
+            {
+                Mat world{};
+                world.m[0] = world.m[5] = world.m[10] = world.m[15] = 1.0f;
+                world.m[12] = positions[i][0], world.m[13] = positions[i][1], world.m[14] = positions[i][2];
+                const Mat pvw = mul(projection, mul(view, world)), cw = mul(clip, world);
+                for (uint32_t row = 0; row < rows; ++row)
+                {
+                    const uint32_t batch = grid + row * strip * 32u;
+                    bozo::render::Vertex v[2];
+                    bool ok[2] = {false, false};
+                    for (uint32_t k = 0; k < strip; ++k)
+                    {
+                        const uint32_t q = batch + k * 32u;
+                        // JC2_WATER_DY: a test offset of the surface's height (y down), to compare with the room's.
+                        static const float yOffset = [] {
+                            const char *v = std::getenv("JC2_WATER_DY");
+                            return v ? std::strtof(v, nullptr) : 0.0f;
+                        }();
+                        const float p[3] = {rf(ram, q + 16), rf(ram, q + 20) + yOffset, rf(ram, q + 24)};
+                        float s[3], wq;
+                        bozo::render::Vertex out;
+                        const bool inside = insideClip(cw, p) && project(pvw, p, s, wq);
+                        if (inside)
+                            out.x = s[0], out.y = s[1], out.z = s[2], out.u = rf(ram, q), out.v = rf(ram, q + 4),
+                            out.rgba = colour;
+                        // A strip: each vertex closes a triangle with the two before it (dropped if one is outside).
+                        if (k >= 2 && inside && ok[0] && ok[1])
+                            draw.vertices.insert(draw.vertices.end(), {v[0], v[1], out});
+                        v[0] = v[1], ok[0] = ok[1];
+                        v[1] = out, ok[1] = inside;
+                    }
+                }
+            }
+            static const bool traceWater = std::getenv("JC2_TRACE_WATER") != nullptr;
+            if (traceWater)
+            {
+                static int traced = 0;
+                if (traced++ < 4)
+                {
+                    float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f, z0 = 1e30f, z1 = -1e30f;
+                    for (const auto &v : draw.vertices)
+                        x0 = std::min(x0, v.x), x1 = std::max(x1, v.x), y0 = std::min(y0, v.y), y1 = std::max(y1, v.y),
+                        z0 = std::min(z0, v.z), z1 = std::max(z1, v.z);
+                    std::fprintf(stderr, "[jc2:water] %u tiles, grid %#x %u x %u, texture %s, %zu vertices, x %.0f..%.0f y %.0f..%.0f z %.0f..%.0f\n",
+                                 tiles, grid, columns, rows, draw.texture ? "yes" : "no", draw.vertices.size(), x0, x1, y0,
+                                 y1, z0, z1);
+                }
+                if (std::getenv("JC2_WATER_NODEPTH"))
+                    m.depthTest = false;
+            }
+            if (!draw.vertices.empty())
+            {
+                ++g_effectDraws;
+                g_effects.push_back(std::move(draw));
+            }
+        }
+
         void drawEffects()
         {
             static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
@@ -1580,6 +1797,7 @@ namespace jc2
         r.registerFunction(kShadow, shadow);
         r.registerFunction(kScreenFade, screenFade);
         r.registerFunction(kPrimitiveDrawer, primitiveDrawer);
+        r.registerFunction(kWaterDraw, waterDraw);
         r.registerFunction(kDepthOfField, depthOfField);
         r.registerFunction(kRoomDraw, roomDraw);
     }

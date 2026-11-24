@@ -668,6 +668,30 @@ Mapped from SLUS_203.09 (`runtime/jc2_debug.cpp`), for testing without playing u
   2...), about one frame every two to three. Everything goes through 0x2B1AC0 (0 direct 0x2B0DA0 calls): with one
   object the DMA handler never asks for the next. Not seen on screen yet: in the arrival view nothing but the hero
   changes between frames, so the water is off camera or its uploads are not drawn by the native renderer; to find.
+- Where the water goes (RAM dumps in D001, 2026-11-24): the game uploads each ring frame to GS page 0x3800 (TBW 1,
+  CT32, 64 x 64) as 16 x 16 macroblocks (0x2AFA3C: the oldest frame from 0x2B1370, the transfer built by 0x2B04C0,
+  the slot freed by 0x2B01D0); its own texture record (not in a bank) is at 0x1947A70 (+0x14 size 64 x 64, +0x20
+  TEX0 0x198007800). It is drawn with a VU1 program the port does not translate yet, "program D" (microcode
+  0x4DFF60, its DMA packet 0x4DFF50; 0x1FB330(packet, kind) picks it for kind 4, 0x4DFBE0 for kind 5), seven times
+  a frame: per draw a context (0x1FB290: 0x31 qwords, camera and light matrices), a 9-qword block at VU 0x33, A+D
+  TEX0/TEX1/ALPHA, then 20 batches of 84 qwords from 0x19CAF90 (a 21 x 20 grid, 3.6 units square: per vertex
+  (S, T, 1, 0) with S, T 0..2, then (x, y, z, 1) with y the animated wave height). The submitter is 0x4314E0's
+  kind-4 path (0x431700), a draw-list kick with 20 callers (the frame dispatcher 0x4333B0's bit 1 routine 0x206850
+  among them). To show it: a native draw for program D's lists (the grid, its matrix, the IPU frame as texture).
+- Native water (2026-11-24, `runtime/jc2_meshes.cpp` waterDraw): 0x206850 is the water routine (the frame
+  dispatcher 0x4333B0's bit 1). The water system at 0x89D3E0 queues tiles (+0x14 count, +0x20 positions; D001: 7
+  tiles of 3.6 x 3.6 from (5.4, 0, 1.8) to (9, 0, 16.2)), double-buffers its wave grid (+0x200 the one drawn; 0x206420
+  moves the waves, a height field) and keeps the texture record at +0x260. The override runs the routine, then draws
+  each tile's grid (20 x 20 quads) with world = the tile's translation, the frame's camera (0x6CC5F4[0]), the GS
+  blend (Cs - Cd) 0x3F + Cd, depth test GEQUAL without write, and the picture the game took last from the IPU ring.
+  Program D's microcode (dumped by walking its MPG packet, disassembled with TMB's tools/vu_disasm.py): init at 0
+  multiplies the context's matrices (VU 0x49 = P V W, 0x55 = clip W), the water's path (VU 53.x = 2) at 0x5B0
+  projects (x, y, z, 1) by P V W and clips by clip W: the same maths, no height offset.
+- Open: in D001's arrival view the room covers the water. The world is y down: the hero's feet and the ground by
+  him are at y -0.6, and the ground chunks (res 2690, flags 0x482A) line the channel between -0.6 and 0 over the
+  tiles, so the surface at y ~0 (+- 0.05 waves) is under them; with the depth test off the water fills the channel's
+  shape, and raised by 0.4 (JC2_WATER_DY=-0.4) it sits in the channel between the banks. Whether the room or the
+  surface is off needs the console's picture of this view.
 - Engine master since this merge answers the IPU's registers as an idle decoder (libs/io.cpp), so without the native
   player the game would no longer stop there: it would run on with frames never written.
 - Testing gotcha: `timeout` (msys) and `scripts/bench_run.sh` lose variables set in front of them (JC2_TRACE_*): put
