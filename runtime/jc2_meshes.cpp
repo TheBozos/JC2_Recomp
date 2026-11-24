@@ -21,11 +21,17 @@
 #include "bozo/render/mesh_draw.h"
 #include "bozo/render/mesh_pack.h"
 #include "bozo/render/renderer.h"
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #define PSAPI_VERSION 2 // GetProcessMemoryInfo from kernel32
 #include <psapi.h>
+#endif
 #include "bozo/render/texture.h"
 #include <memory>
 #include <algorithm>
@@ -3204,11 +3210,23 @@ namespace jc2
                         (unsigned long long)g_projectedBatches, (unsigned long long)g_effectDraws);
         if (g_frames % 600 == 0 && std::getenv("JC2_TRACE_MEMORY"))
         {
+            unsigned long long used = 0; // the process's private (Windows) or resident (Linux) memory, in bytes
+#ifdef _WIN32
             PROCESS_MEMORY_COUNTERS_EX m{};
             GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&m), sizeof(m));
-            std::printf("[jc2:memory] frame %llu: %llu MB private; caches: %zu pictures, %zu textures, %zu projected, %zu "
+            used = m.PrivateUsage;
+#else
+            if (std::FILE *f = std::fopen("/proc/self/statm", "r"))
+            {
+                unsigned long long size = 0, resident = 0;
+                if (std::fscanf(f, "%llu %llu", &size, &resident) == 2)
+                    used = resident * 4096ull;
+                std::fclose(f);
+            }
+#endif
+            std::printf("[jc2:memory] frame %llu: %llu MB in use; caches: %zu pictures, %zu textures, %zu projected, %zu "
                         "effect textures; %zu opaque, %zu blended draws\n",
-                        (unsigned long long)g_frames, (unsigned long long)(m.PrivateUsage >> 20), pictureCacheSize(),
+                        (unsigned long long)g_frames, used >> 20, pictureCacheSize(),
                         g_textures.size(), g_projectedViews.size(), g_effectTextures.size(), g_opaque.size(),
                         g_blended.size());
         }
