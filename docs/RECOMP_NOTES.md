@@ -682,6 +682,12 @@ Mapped from SLUS_203.09 (`runtime/jc2_debug.cpp`), for testing without playing u
   how its huge triangles are cut at the view volume (program B is drawn cut, not dropped), to check against the
   console or program B's clipping path. JC2_TRACE_DRAWS now also prints each part's texture, bank / slot / picture
   and UV range.
+  - Program B's path for these parts (flags 0x4031: 0x4000, not 0x100 nor 0x800, 0x60 not both: L_0300 and on):
+    each vertex's clip-space position by the clip matrix (vf16..vf19), CLIP on the last three, FCAND 0x3FFFF: a
+    triangle with any vertex outside the volume gets ADC, dropped whole, as the projected path (L_2330) does. The
+    port cuts static triangles at the volume instead (57567d8, for the holes dropping left near the camera); for this
+    plane the console drops its big edge triangles, so bands may be the console's too. Left as is without a
+    reference.
 
 ## IPU animations (2026-11-23)
 
