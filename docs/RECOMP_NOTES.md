@@ -629,8 +629,10 @@ options that set it (`runtime/jc2_debug.cpp`), to reach later content without pl
   scene change sets 0x878614 (0x1E5400; reset to 0 for a town scene, 0x1E7668). A forest's entry (0x22B770) takes
   its sub-area from 0x205110: the word at stage of the area's table (0x5CA340 + 4 area, 36 words). Areas come from
   the scene list at 0x5A92A0 (28 bytes: +0 scene, +0x16 area; 0x1EAD60): WIND 2, AQUA 0, FIRE 1, TERA 3, the dark
-  forests 4-7, 8 DLLTH, 9 TUTO, 10 the town. The effects read the area and sub-area at 0x8788D2 and 0x8788D6
-  (0x43DD50 -> 0x433AF0).
+  forests 4-7, 8 DLLTH, 9 TUTO, 10 the town. 0x8788D2 and 0x8788D6 hold the area and the map's sub-area. The
+  effects' table is indexed by the stage, not by that sub-area: 0x1A0AB4 passes the area and 0x878612 to 0x43DD50,
+  whose 0x433AF0(area, stage) call sets the flags (so the Fire Forest's bit 0x100 comes with stages 8 to 11, the
+  sub-areas 0x18, 0x1E, 0x15, 0x1B, "Firewalking").
 - **Use**: `--chapter N`, `--story-flag N` / `--clear-story-flag N`, `--scene-done N` / `--scene-not-done N`,
   `--forest-stage N`, `--subarea N` (the stage giving that sub-area in the next forest entered, with `--scene`, or the
   current forest entered again). They are applied at the first frame the game is in a scene (after New game clears
@@ -759,9 +761,9 @@ options that set it (`runtime/jc2_debug.cpp`), to reach later content without pl
   vertices), and no draw of the frame masks depth (every ZBUF is Z32 with ZMSK clear). Walking up from the arrival
   point (pad UP for 150 frames from 24700) the pool beyond the plants shows the water, animated, between its banks.
 - Program D in general (2026-11-24): the water is one user of a generic submitter. The frame's effects task
-  (0x4333B0) calls one routine per bit of the area's effect flags, set per forest and sub-area by 0x433AF0 from the
+  (0x4333B0) calls one routine per bit of the area's effect flags, set per forest and stage by 0x433AF0 from the
   table at 0x64E2F0 (forests 0x19801 = bits 0x1 water, 0x800, 0x1000, 0x8000, 0x10000; area 1 adds 0x400 or 0x100
-  by sub-area; area 4 to 7 0xB800 / 0xB880). Bits 0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x80, 0x400, 0x800, 0x1000, 0x8000
+  by stage, see "Story state"); area 4 to 7 0xB800 / 0xB880). Bits 0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x80, 0x400, 0x800, 0x1000, 0x8000
   draw through 0x4314E0(object, position, texture animation, GS parameters, t0, camera index; f12 scale); 0x40 and
   0x100 select a fifth program (kind 5, 0x4DFBE0) directly. The object's +0x30 is program D's path (VU 53.x) and
   sets the batches (0x432170: per mode the vertices a batch and qwords a vertex). The GS parameters are three A+D
@@ -817,3 +819,26 @@ options that set it (`runtime/jc2_debug.cpp`), to reach later content without pl
   `env VAR=1` in the command after bench_run.sh.
 - The JC2 save states (before 2026-11-24) needed the engine to read four older section layouts: pad (libpad2 sockets),
   mpeg (`inputEnded`), sif (the IOP's software registers) and the 989SND section (absent).
+
+## Heat haze, VU1 program E (2026-11-24)
+
+The Fire Forest's stages 8 to 11 ("Firewalking") set the effects task's bit 0x100, whose routine 0x1FCF30 drives the
+fifth VU1 program (kind 5: microcode 0x4DFBF0, 107 pairs, uploaded by 0x1FB330). Reached with `--forest-stage 8
+--scene 2`; read from a frame's packet list 1 (the routine appends to it, then to list 5).
+- Program E draws in screen space (no matrices): MSCALF 2 kicks an A+D packet at VU 0x34; MSCNT runs a batch at TOPS
+  (+0 a GIF tag, PRE with its PRIM, count in x). VU 0x33.x bit 0: a vertex per qword (x, y, u, v) in GS pixels, 7 a
+  strip, UV max(u, 0), max(v, 0), colour VU 0 (128, 128, 128, 128) with alpha - 64 except vertices 1 and 4, ADC on
+  vertices 0, 1 and 4 (each strip two ribbons: triangles 012, 123, 345, 456). Bit 1: three qwords a vertex (UV, colour
+  with alpha |a| + 31, XYZ as is).
+- The haze (one frame: 66 batches, 3220 vertices): the setup (0x1FDEA0, 0x1FD0F0) copies the 640 x 224 frame (TEX0_2
+  TBP 0x8C0 = FBP 0x46) to a 320 x 112 image (FRAME_2 FBP 0x129, XYOFFSET_2 (1888, 1992)) with a sprite, alpha 0x40,
+  no blend; TEST "alpha NEVER, FB_ONLY" writes colour and alpha without Z. 460 strips (0x1FDC40, vertices from
+  0x199D510) sample the frame at shifted UVs into the image (ALPHA 0x44, alpha 64 / 128). A DIRECT fan (0x1FD5D0,
+  context 1, TEX0_1 the image, TCC 1, bilinear) lays the image over the frame, vertex alpha 0x20 at the centre and
+  0x60 at the corners: a shimmer, stronger toward the edges.
+- Native (`runtime/jc2_meshes.cpp` heatHaze, override of 0x1FCF30): the routine runs, then the chain it appended is
+  read as the GS takes it (VIF UNPACK / DIRECT / MSCALF / MSCNT, program E's two paths, A+D writes, sprites, strips
+  and fans with ADC). A buffer 640 wide is the frame so far (Material::fromFrame, source 0), the image auxiliary target
+  2 at its size; drawn after the effects, before the depth of field and the fades. Seen at stage 8: the edges soften
+  (edge strength -33% top right, -26% left, -15% centre); not compared with a console capture. JC2_HEAT_HAZE=0 turns it
+  off, JC2_TRACE_HAZE=1 counts it.

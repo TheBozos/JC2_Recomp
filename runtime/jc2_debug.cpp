@@ -60,7 +60,7 @@ namespace jc2
         constexpr uint32_t kSceneDone = 0x008788ECu;  // a bit per scene, set as its event is played (0x1F4B20)
         constexpr uint32_t kForestStage = 0x00878612u; // a forest's stage (0x1A1050 copies it from the next one)
         constexpr uint32_t kForestStageNext = 0x00878614u;
-        [[maybe_unused]] constexpr uint32_t kArea = 0x008788D2u;       // the effects' area and sub-area (0x433AF0)
+        [[maybe_unused]] constexpr uint32_t kArea = 0x008788D2u;       // the area and the map's sub-area (the effects: area, stage)
         [[maybe_unused]] constexpr uint32_t kSubArea = 0x008788D6u;
         constexpr uint32_t kSceneAreas = 0x005A92A0u; // 28 bytes: +0 a scene, +0x16 its area (0x1EAD60); -1 ends
         constexpr uint32_t kStageSubAreas = 0x005CA340u; // per area a table of 36 words: stage -> sub-area (0x205110)
@@ -532,7 +532,7 @@ namespace jc2
             if (!g_ram)
                 return;
             const int current = r16(g_ram, kSceneCurrent);
-            ImGui::Text("Chapter %d   forest stage %d (next %d)   effects area %d sub-area %d", r16(g_ram, kChapter),
+            ImGui::Text("Chapter %d   forest stage %d (next %d)   area %d sub-area %d", r16(g_ram, kChapter),
                         r16(g_ram, kForestStage), r16(g_ram, kForestStageNext), r16(g_ram, kArea), r16(g_ram, kSubArea));
             static int chapter = 5, stageValue = 0, subArea = 8;
             ImGui::SetNextItemWidth(100);

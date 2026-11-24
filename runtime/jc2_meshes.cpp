@@ -29,6 +29,7 @@
 #include "bozo/render/texture.h"
 #include <memory>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -2732,6 +2733,421 @@ namespace jc2
             }
         }
 
+        // ---- The heat haze: 0x1FCF30, the effects task's bit 0x100 (the Fire Forest's stages 8 to 11) ----
+        // VU1 program E (microcode 0x4DFBF0, 107 pairs; 0x1FB330 kind 5) draws in screen space. The routine appends to
+        // packet list 1: an A+D setup kicked at VU 0x34 (MSCALF 2) that copies the 640 x 224 frame (TEX0 its buffer) into
+        // a 320 x 112 image (FRAME_2 FBP 0x129) with a sprite, alpha 0x40; batches at TOPS (MSCNT): +0 a GIF tag (its PRIM
+        // a strip in context 2, count in x), then per VU 0x33.x: bit 0 (x, y, u, v) a vertex, 7 a strip, UV max(u, 0),
+        // max(v, 0), colour VU 0 with alpha - 64 but vertices 1 and 4 at full alpha, ADC on vertices 0, 1 and 4; bit 1
+        // three qwords a vertex (UV, colour with alpha |a| + 31, XYZ). About 460 strips sample the frame at shifted UVs
+        // into the image. Then a DIRECT fan (0x1FD5D0) lays the image back over the frame, alpha 0x20 at the centre and
+        // 0x60 at the corners, times the image's alpha (TCC). Here the appended packet is read as the GS would take it:
+        // the screen's buffer (FBW 10) is the frame so far (Material::fromFrame), the image auxiliary target 2.
+        constexpr uint32_t kHeatHaze = 0x001FCF30u;
+        constexpr uint32_t kPacketLists = 0x006CC5F0u; // 0x13DD50: + 16 n, +0x84 base, +0x88 size (qwords), +0x8C used
+        constexpr uint32_t kListParity = 0x006CC670u;
+        constexpr uint8_t kHazeTarget = 2;
+        struct HazeDraw
+        {
+            bozo::render::Material material;
+            std::vector<bozo::render::Vertex> vertices;
+        };
+        std::vector<HazeDraw> g_haze;
+        const bool hazeOff = [] {
+            const char *v = std::getenv("JC2_HEAT_HAZE");
+            return v && v[0] == '0';
+        }();
+        const bool traceHaze = std::getenv("JC2_TRACE_HAZE") != nullptr;
+
+        uint32_t listEnd(const uint8_t *ram, uint32_t list)
+        {
+            const uint32_t e = kPacketLists + 16u * list;
+            return r32(ram, e + 0x84) + ((r32(ram, e + 0x88) >> 1) * (r32(ram, kListParity) & 1u) + r32(ram, e + 0x8C)) * 16u;
+        }
+
+        // The GS as the haze's packets drive it: two contexts, the vertex queue, the primitives made into draws.
+        struct HazeGs
+        {
+            struct Context
+            {
+                uint32_t fbp = 0, fbw = 10;
+                float offsetX = 0, offsetY = 0;
+                uint32_t width = 640, height = 224; // SCISSOR's x1 + 1, y1 + 1
+                uint64_t tex0 = 0, tex1 = 0, alpha = 0x44, test = 0;
+            } context[2];
+            uint32_t prim = 0, rgba = 0x80808080u;
+            float u = 0, v = 0;
+            struct Point
+            {
+                float x, y, u, v;
+                uint32_t rgba;
+            };
+            std::vector<Point> queue;
+            uint32_t imageFbp = ~0u, imageWidth = 320, imageHeight = 112;
+            uint64_t triangles = 0;
+
+            void setPrim(uint32_t p)
+            {
+                prim = p;
+                queue.clear();
+            }
+            void write(uint32_t reg, uint64_t d)
+            {
+                Context &c = context[reg & 1u];
+                switch (reg)
+                {
+                case 0x00: setPrim(uint32_t(d & 0x7FF)); break;
+                case 0x01: rgba = uint32_t(d); break;
+                case 0x03: u = float(d & 0x3FFF) / 16.0f, v = float((d >> 16) & 0x3FFF) / 16.0f; break;
+                case 0x05: vertex(float(d & 0xFFFF) / 16.0f, float((d >> 16) & 0xFFFF) / 16.0f, true); break;
+                case 0x0D: vertex(float(d & 0xFFFF) / 16.0f, float((d >> 16) & 0xFFFF) / 16.0f, false); break;
+                case 0x06: case 0x07: c.tex0 = d; break;
+                case 0x14: case 0x15: c.tex1 = d; break;
+                case 0x18: case 0x19: c.offsetX = float(d & 0xFFFF) / 16.0f, c.offsetY = float((d >> 32) & 0xFFFF) / 16.0f; break;
+                case 0x40: case 0x41:
+                    c.width = uint32_t((d >> 16) & 0x7FF) + 1u, c.height = uint32_t((d >> 48) & 0x7FF) + 1u;
+                    break;
+                case 0x42: case 0x43: c.alpha = d; break;
+                case 0x47: case 0x48: c.test = d; break;
+                case 0x4C: case 0x4D:
+                    c.fbp = uint32_t(d & 0x1FF), c.fbw = uint32_t((d >> 16) & 0x3F);
+                    break;
+                default: break;
+                }
+            }
+            // A vertex at (x, y) GS pixels with the current colour and UV; kick: it draws (XYZ2, not ADC / XYZ3).
+            void vertex(float x, float y, bool kick)
+            {
+                queue.push_back({x, y, u, v, rgba});
+                const uint32_t type = prim & 7u;
+                if (type == 6) // sprite: a pair
+                {
+                    if (queue.size() == 2)
+                    {
+                        if (kick)
+                        {
+                            const Point &a = queue[0], &b = queue[1];
+                            const Point p0{a.x, a.y, a.u, a.v, b.rgba}, p1{b.x, a.y, b.u, a.v, b.rgba},
+                                        p2{a.x, b.y, a.u, b.v, b.rgba}, p3{b.x, b.y, b.u, b.v, b.rgba};
+                            triangle(p0, p1, p2), triangle(p1, p3, p2);
+                        }
+                        queue.clear();
+                    }
+                }
+                else if (type == 4) // strip
+                {
+                    if (queue.size() > 3)
+                        queue.erase(queue.begin());
+                    if (queue.size() == 3 && kick)
+                        triangle(queue[0], queue[1], queue[2]);
+                }
+                else if (type == 5) // fan: the first and the last
+                {
+                    if (queue.size() > 3)
+                        queue.erase(queue.begin() + 1);
+                    if (queue.size() == 3 && kick)
+                        triangle(queue[0], queue[1], queue[2]);
+                }
+                else if (type == 3) // triangles
+                {
+                    if (queue.size() == 3)
+                    {
+                        if (kick)
+                            triangle(queue[0], queue[1], queue[2]);
+                        queue.clear();
+                    }
+                }
+                else
+                    queue.clear(); // points and lines: none in the haze
+            }
+            void triangle(const Point &a, const Point &b, const Point &c)
+            {
+                const Context &k = context[(prim >> 9) & 1u];
+                // TEST: alpha test NEVER keeps per AFAIL (0 nothing, 1 the colour and alpha, 2 Z only, 3 RGB).
+                uint8_t mask = 0xF;
+                if ((k.test & 1u) && ((k.test >> 1) & 7u) == 0)
+                {
+                    const uint32_t afail = uint32_t((k.test >> 12) & 3u);
+                    if (afail == 0 || afail == 2)
+                        return;
+                    mask = afail == 3 ? 0x7 : 0xF;
+                }
+                const bool screen = k.fbw >= 10; // the 640-wide display buffer; else the image
+                if (!screen)
+                    imageFbp = k.fbp, imageWidth = k.width, imageHeight = k.height;
+                const float bufferWidth = screen ? 640.0f : float(k.width), bufferHeight = screen ? 224.0f : float(k.height);
+                bozo::render::Material m;
+                m.target = screen ? 0 : kHazeTarget;
+                if (!screen)
+                    m.targetWidth = uint16_t(k.width), m.targetHeight = uint16_t(k.height);
+                m.depthTest = false, m.depthWrite = false;
+                m.colourMask = mask;
+                float textureWidth = 1, textureHeight = 1;
+                m.textured = (prim >> 4) & 1u;
+                if (m.textured)
+                {
+                    const uint32_t tbp = uint32_t(k.tex0 & 0x3FFF), tbw = uint32_t((k.tex0 >> 14) & 0x3F);
+                    m.fromFrame = 1;
+                    if (tbw >= 10)
+                        m.source = 0, textureWidth = 640, textureHeight = 224;
+                    else if (tbp == imageFbp * 32u)
+                        m.source = kHazeTarget, textureWidth = float(imageWidth), textureHeight = float(imageHeight);
+                    else
+                        return; // a texture of its own: none in the haze
+                    m.frameWidth = uint16_t(textureWidth), m.frameHeight = uint16_t(textureHeight);
+                    m.textureAlpha = (k.tex0 >> 34) & 1u;
+                    m.nearest = !(k.tex1 & 0x20u);
+                    m.clampU = m.clampV = true;
+                }
+                if ((prim >> 6) & 1u)
+                {
+                    m.gsBlend = true;
+                    m.blendA = uint8_t(k.alpha & 3u), m.blendB = uint8_t((k.alpha >> 2) & 3u);
+                    m.blendC = uint8_t((k.alpha >> 4) & 3u), m.blendD = uint8_t((k.alpha >> 6) & 3u);
+                    m.blendFix = uint8_t(k.alpha >> 32);
+                }
+                else
+                    m.blend = bozo::render::Material::Blend::Opaque;
+                auto out = [&](const Point &p) {
+                    bozo::render::Vertex v;
+                    // The buffer's pixel to the screen's (1728..2368, 1824..2272): an image is the screen at its size.
+                    v.x = 1728.0f + (p.x - k.offsetX) * 640.0f / bufferWidth;
+                    v.y = 1824.0f + (p.y - k.offsetY) * 448.0f / bufferHeight;
+                    v.z = 0;
+                    v.u = p.u / textureWidth, v.v = p.v / textureHeight;
+                    v.rgba = p.rgba;
+                    return v;
+                };
+                auto key = [](const bozo::render::Material &x) {
+                    return std::array<uint32_t, 6>{uint32_t(x.target) | uint32_t(x.source) << 8 | uint32_t(x.colourMask) << 16 |
+                                                       uint32_t(x.textured) << 24 | uint32_t(x.textureAlpha) << 25 |
+                                                       uint32_t(x.nearest) << 26 | uint32_t(x.gsBlend) << 27,
+                                                   uint32_t(x.blendA) | uint32_t(x.blendB) << 8 | uint32_t(x.blendC) << 16 |
+                                                       uint32_t(x.blendD) << 24,
+                                                   uint32_t(x.blendFix) | uint32_t(x.blend) << 8,
+                                                   uint32_t(x.targetWidth) | uint32_t(x.targetHeight) << 16,
+                                                   uint32_t(x.frameWidth) | uint32_t(x.frameHeight) << 16, uint32_t(x.fromFrame)};
+                };
+                const bool same = !g_haze.empty() && key(g_haze.back().material) == key(m);
+                if (!same)
+                    g_haze.push_back({m, {}});
+                g_haze.back().vertices.insert(g_haze.back().vertices.end(), {out(a), out(b), out(c)});
+                ++triangles;
+            }
+            // A GIF packet in RAM, its words' addresses from at[first] (PACKED: A+D, PRIM, RGBAQ, UV, XYZ2).
+            uint32_t gif(const uint8_t *ram, const std::vector<uint32_t> &at, size_t first, size_t qwords)
+            {
+                size_t q = 0;
+                auto word = [&](size_t qw, int k) { return r32(ram, at[first + qw * 4 + size_t(k)]); };
+                while (q < qwords)
+                {
+                    const uint64_t lo = uint64_t(word(q, 0)) | uint64_t(word(q, 1)) << 32;
+                    const uint64_t regs = uint64_t(word(q, 2)) | uint64_t(word(q, 3)) << 32;
+                    ++q;
+                    const uint32_t nloop = uint32_t(lo & 0x7FFF), flg = uint32_t((lo >> 58) & 3u);
+                    const uint32_t nreg = uint32_t(lo >> 60) ? uint32_t(lo >> 60) : 16u;
+                    if ((lo >> 46) & 1u)
+                        setPrim(uint32_t((lo >> 47) & 0x7FF));
+                    if (flg != 0)
+                    {
+                        q += flg == 1 ? (nloop * nreg + 1) / 2 : nloop;
+                        continue;
+                    }
+                    for (uint32_t i = 0; i < nloop && q < qwords; ++i)
+                        for (uint32_t r = 0; r < nreg && q < qwords; ++r, ++q)
+                        {
+                            const uint32_t reg = uint32_t(regs >> (4 * r)) & 15u;
+                            const uint32_t w0 = word(q, 0), w1 = word(q, 1), w2 = word(q, 2), w3 = word(q, 3);
+                            if (reg == 0xE)
+                                write(w2 & 0xFF, uint64_t(w0) | uint64_t(w1) << 32);
+                            else if (reg == 0)
+                                setPrim(w0 & 0x7FF);
+                            else if (reg == 1)
+                                rgba = (w0 & 0xFF) | (w1 & 0xFF) << 8 | (w2 & 0xFF) << 16 | (w3 & 0xFF) << 24;
+                            else if (reg == 3)
+                                u = float(w0 & 0x3FFF) / 16.0f, v = float(w1 & 0x3FFF) / 16.0f;
+                            else if (reg == 5)
+                                vertex(float(w0 & 0xFFFF) / 16.0f, float(w1 & 0xFFFF) / 16.0f, !((w3 >> 15) & 1u));
+                        }
+                }
+                return uint32_t(q);
+            }
+        };
+
+        uint32_t hazeColour(const float c[4], float alphaAdd, bool absolute)
+        {
+            uint32_t out = 0;
+            for (int k = 0; k < 4; ++k)
+            {
+                float f = c[k];
+                if (k == 3)
+                    f = (absolute ? std::fabs(f) : f) + alphaAdd;
+                const int32_t i = std::isfinite(f) ? int32_t(f) : 0; // FTOI0
+                out |= uint32_t(std::clamp(i, 0, 255)) << (8 * k);
+            }
+            return out;
+        }
+
+        void heatHaze(uint8_t *ram, R5900Context *ctx, Runtime *rt)
+        {
+            const uint32_t start = listEnd(ram, 1);
+            rt->functions.generated(kHeatHaze)(ram, ctx, rt);
+            const uint32_t end = listEnd(ram, 1);
+            if (meshesOff || hazeOff || end <= start || end - start > 0x100000u)
+                return;
+            // The appended chain's VIF1 stream, word by word (each word's RAM address).
+            std::vector<uint32_t> at;
+            uint32_t tag = start;
+            for (int n = 0; n < 4096 && tag >= start && tag < end; ++n)
+            {
+                const uint32_t lo = r32(ram, tag), hi = r32(ram, tag + 4);
+                const uint32_t qwc = lo & 0xFFFF, id = (lo >> 28) & 7u, address = hi & 0x7FFFFFF0u;
+                at.push_back(tag + 8), at.push_back(tag + 12);
+                const uint32_t data = id == 3 || id == 4 ? address : tag + 16;
+                for (uint32_t k = 0; k < qwc * 4u; ++k)
+                    at.push_back(data + 4u * k);
+                if (id == 1)
+                    tag += 16 + qwc * 16;
+                else if (id == 3 || id == 4)
+                    tag += 16;
+                else if (id == 2)
+                    tag = address;
+                else
+                    break;
+            }
+            HazeGs gs;
+            uint32_t vu[1024][4] = {};
+            std::vector<std::array<uint32_t, 4>> batch(1024, std::array<uint32_t, 4>{});
+            uint32_t batches = 0, vertices = 0;
+            auto runBatch = [&]() {
+                ++batches;
+                float colour[4];
+                std::memcpy(colour, vu[0], 16);
+                const uint32_t count = batch[0][0] & 0x7FFFu;
+                const uint64_t lo = uint64_t(batch[0][0]) | uint64_t(batch[0][1]) << 32;
+                if ((lo >> 46) & 1u)
+                    gs.setPrim(uint32_t((lo >> 47) & 0x7FF));
+                const uint32_t flags = vu[0x33][0];
+                if (flags & 1u)
+                {
+                    const uint32_t low = hazeColour(colour, -64.0f, false), full = hazeColour(colour, 0, false);
+                    for (uint32_t i = 0; i < count && 1u + i < batch.size(); ++i)
+                    {
+                        float in[4];
+                        std::memcpy(in, batch[1 + i].data(), 16);
+                        const uint32_t k = i % 7u;
+                        gs.rgba = k == 1 || k == 4 ? full : low;
+                        gs.u = std::max(in[2], 0.0f), gs.v = std::max(in[3], 0.0f);
+                        gs.vertex(in[0], in[1], !(k == 0 || k == 1 || k == 4));
+                        ++vertices;
+                    }
+                }
+                else if (flags & 2u)
+                {
+                    for (uint32_t i = 0; i < count && 3u + 3u * i < batch.size(); ++i)
+                    {
+                        const auto &uv = batch[1 + 3 * i], &c = batch[2 + 3 * i], &xyz = batch[3 + 3 * i];
+                        float cf[4];
+                        std::memcpy(cf, c.data(), 16);
+                        gs.rgba = hazeColour(cf, 31.0f, true);
+                        gs.u = float(uv[0] & 0x3FFF) / 16.0f, gs.v = float(uv[1] & 0x3FFF) / 16.0f;
+                        gs.vertex(float(xyz[0] & 0xFFFF) / 16.0f, float(xyz[1] & 0xFFFF) / 16.0f, !((xyz[3] >> 15) & 1u));
+                        ++vertices;
+                    }
+                }
+                for (auto &q : batch)
+                    q = {};
+            };
+            for (size_t p = 0; p < at.size();)
+            {
+                const uint32_t code = r32(ram, at[p++]);
+                const uint32_t cmd = (code >> 24) & 0x7Fu, num = (code >> 16) & 0xFFu, imm = code & 0xFFFFu;
+                if (cmd == 0x4A) // MPG: the program's code
+                {
+                    while (p < at.size() && at[p] % 8u)
+                        ++p;
+                    p += (num ? num : 256u) * 2u;
+                }
+                else if (cmd == 0x50 || cmd == 0x51) // DIRECT / DIRECTHL
+                {
+                    while (p < at.size() && at[p] % 16u)
+                        ++p;
+                    const size_t qwords = std::min<size_t>(imm ? imm : 65536u, (at.size() - p) / 4);
+                    gs.gif(ram, at, p, qwords);
+                    p += qwords * 4;
+                }
+                else if ((cmd & 0x60u) == 0x60u) // UNPACK
+                {
+                    const uint32_t vn = (cmd >> 2) & 3u, vl = cmd & 3u, n = num ? num : 256u;
+                    const size_t words = ((32u >> vl) * (vn + 1u) * n + 31u) / 32u;
+                    if (vn == 3 && vl == 0)
+                        for (uint32_t i = 0; i < n && p + 4u * i + 3u < at.size(); ++i)
+                        {
+                            const uint32_t a = (imm & 0x3FFu) + i;
+                            uint32_t *dst = (imm & 0x8000u) ? (a < batch.size() ? batch[a].data() : nullptr)
+                                                            : (a < 1024u ? vu[a] : nullptr);
+                            if (dst)
+                                for (int k = 0; k < 4; ++k)
+                                    dst[k] = r32(ram, at[p + 4u * i + uint32_t(k)]);
+                        }
+                    p += words;
+                }
+                else if (cmd == 0x14 || cmd == 0x15 || cmd == 0x17) // MSCAL, MSCALF, MSCNT
+                {
+                    if (cmd != 0x17 && imm == 2) // the setup's kick (XGKICK VU 0x34)
+                    {
+                        // The setup's GIF packet in VU memory (not in RAM): read from a copy, as gif() reads.
+                        HazeGs &g = gs;
+                        std::vector<uint32_t> scratch;
+                        for (uint32_t a = 0x34; a < 1024u; ++a)
+                            for (int k = 0; k < 4; ++k)
+                                scratch.push_back(vu[a][k]);
+                        size_t q = 0;
+                        auto word = [&](size_t qw, int k) { return scratch[qw * 4 + size_t(k)]; };
+                        const size_t total = scratch.size() / 4;
+                        while (q < total)
+                        {
+                            const uint64_t lo = uint64_t(word(q, 0)) | uint64_t(word(q, 1)) << 32;
+                            const uint64_t regs = uint64_t(word(q, 2)) | uint64_t(word(q, 3)) << 32;
+                            ++q;
+                            const uint32_t nloop = uint32_t(lo & 0x7FFF);
+                            const uint32_t nreg = uint32_t(lo >> 60) ? uint32_t(lo >> 60) : 16u;
+                            if ((lo >> 46) & 1u)
+                                g.setPrim(uint32_t((lo >> 47) & 0x7FF));
+                            for (uint32_t i = 0; i < nloop && q < total; ++i)
+                                for (uint32_t r = 0; r < nreg && q < total; ++r, ++q)
+                                    if ((uint32_t(regs >> (4 * r)) & 15u) == 0xE)
+                                        g.write(word(q, 2) & 0xFF, uint64_t(word(q, 0)) | uint64_t(word(q, 1)) << 32);
+                            if ((lo >> 15) & 1u) // EOP
+                                break;
+                        }
+                    }
+                    else if (cmd == 0x17 || imm == 7)
+                        runBatch();
+                }
+                else if (cmd == 0x20)
+                    p += 1; // STMASK
+                else if (cmd == 0x30 || cmd == 0x31)
+                    p += 4; // STROW, STCOL
+            }
+            if (traceHaze)
+            {
+                static uint64_t calls = 0;
+                if (calls++ % 300 == 0)
+                    std::printf("[jc2:haze] %u words, %u batches, %u vertices, %llu triangles, %zu draws (image FBP %#x %u x %u)\n",
+                                unsigned(at.size()), batches, vertices, (unsigned long long)gs.triangles, g_haze.size(),
+                                gs.imageFbp, gs.imageWidth, gs.imageHeight);
+            }
+        }
+        void drawHeatHaze()
+        {
+            static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+            for (const HazeDraw &d : g_haze)
+                bozo::render::Renderer::instance().draw(d.material, identity, d.vertices.data(),
+                                                         uint32_t(d.vertices.size()));
+            g_haze.clear();
+        }
+
         bozo::render::MeshSubmitter g_submitter;
     } // namespace
 
@@ -2743,6 +3159,7 @@ namespace jc2
         for (const auto &d : g_blended)
             g_submitter.submit(d);
         drawEffects();
+        drawHeatHaze();
         drawDepthOfField();
         drawFades();
         if (++g_frames % 600 == 0 && (g_drawn || g_missing))
@@ -2792,6 +3209,7 @@ namespace jc2
         r.registerFunction(kScreenFade, screenFade);
         r.registerFunction(kPrimitiveDrawer, primitiveDrawer);
         r.registerFunction(kProgramD, programD);
+        r.registerFunction(kHeatHaze, heatHaze);
         r.registerFunction(kDepthOfField, depthOfField);
         r.registerFunction(kRoomDraw, roomDraw);
     }
